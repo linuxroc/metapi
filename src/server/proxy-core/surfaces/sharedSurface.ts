@@ -19,6 +19,8 @@ import { refreshOauthAccessTokenSingleflight } from '../../services/oauth/refres
 import { proxyChannelCoordinator } from '../../services/proxyChannelCoordinator.js';
 import { readRuntimeResponseText } from '../executors/types.js';
 import { selectProxyChannelForAttempt } from '../channelSelection.js';
+import { extractOpenAiResponsesSessionId } from '../../transformers/openai/responses/sessionId.js';
+import { extractAnthropicMessagesSessionId } from '../../transformers/anthropic/messages/sessionId.js';
 
 type SelectedChannel = Awaited<ReturnType<typeof tokenRouter.selectChannel>>;
 type SurfaceWarningScope = 'chat' | 'responses';
@@ -101,6 +103,88 @@ type SurfaceResolvedUsageSummary = {
   usageSource: 'upstream' | 'self-log' | 'unknown';
 };
 
+/**
+ * Sentinel placed in the `keyIdSlot` of a Protocol_Session_Key when the
+ * caller cannot be associated with a concrete `downstream_api_keys.id`
+ * (anonymous request, missing key, non-positive id, or non-integer id).
+ *
+ * Intentionally distinct from the legacy CLI-level coordinator's
+ * `'key:anonymous'` placeholder so that the two key namespaces remain
+ * non-overlapping; combined with the `proto-v1|` prefix used by
+ * {@link buildProtocolSessionKey}, collisions across the two stores are
+ * structurally impossible.
+ *
+ * Part of the session-stick-routing feature; see Requirement 3.3.
+ */
+export const ANON_DOWNSTREAM_API_KEY_SENTINEL = 'key:anon';
+
+/**
+ * Input shape for {@link buildProtocolSessionKey}.
+ *
+ * Caller contract:
+ * - `continuationId` MUST already be trimmed and non-empty. The composing
+ *   function will trim again defensively but does not re-validate emptiness;
+ *   the upstream check belongs in `buildSurfaceStickySessionKey` which feeds
+ *   this helper only after the protocol-level extractor returned a non-null
+ *   string.
+ * - `downstreamApiKeyId` may be `null` / `undefined` / `0` / negative /
+ *   non-integer / `NaN`; any of those routes the slot to
+ *   {@link ANON_DOWNSTREAM_API_KEY_SENTINEL}.
+ */
+export type ProtocolSessionKeyInput = {
+  downstreamApiKeyId: number | null | undefined;
+  downstreamPath: string;
+  requestedModel: string;
+  protocolId: 'openai/responses' | 'anthropic/messages';
+  continuationId: string;
+};
+
+/**
+ * Compose a Protocol_Session_Key string for the session-stick-routing feature.
+ *
+ * This is the single, scope-aware assembler that turns a protocol-level
+ * continuation identifier (extracted upstream by a transformer-pure helper)
+ * plus the request scope tuple into the Map key consumed by
+ * `proxyChannelCoordinator`'s sticky bindings.
+ *
+ * Encoding format:
+ * ```
+ * proto-v1|{keyIdSlot}|{path}|{model}|{protocolId}|{continuationId}
+ * ```
+ * - `keyIdSlot`: `key:${id}` when `downstreamApiKeyId` is a positive integer,
+ *   otherwise {@link ANON_DOWNSTREAM_API_KEY_SENTINEL}.
+ * - `path`: trimmed `downstreamPath`, or `/` when empty.
+ * - `model`: trimmed `requestedModel`, or `_` when empty.
+ * - `continuationId`: trimmed continuation identifier (caller guarantees
+ *   non-empty after trim).
+ *
+ * The `proto-v1|` prefix carves out a stable namespace that cannot collide
+ * with the legacy CLI-level `proxyChannelCoordinator.buildStickySessionKey`
+ * output (which uses `key:` / `key:anonymous` without the version prefix).
+ *
+ * Intended caller: {@link buildSurfaceStickySessionKey} only. Surface files
+ * MUST go through `buildSurfaceStickySessionKey` rather than calling this
+ * helper directly so that the protocol-level vs CLI-level priority order
+ * stays centralized in one place.
+ *
+ * @see Requirements 3.1, 3.2, 3.3, 9.3
+ */
+export function buildProtocolSessionKey(input: ProtocolSessionKeyInput): string {
+  const rawKeyId = input.downstreamApiKeyId;
+  const keyIdSlot = typeof rawKeyId === 'number'
+    && Number.isFinite(rawKeyId)
+    && Number.isInteger(rawKeyId)
+    && rawKeyId > 0
+    ? `key:${rawKeyId}`
+    : ANON_DOWNSTREAM_API_KEY_SENTINEL;
+  const trimmedPath = (input.downstreamPath || '').trim();
+  const path = trimmedPath.length > 0 ? trimmedPath : '/';
+  const trimmedModel = (input.requestedModel || '').trim();
+  const model = trimmedModel.length > 0 ? trimmedModel : '_';
+  const cont = input.continuationId.trim();
+  return `proto-v1|${keyIdSlot}|${path}|${model}|${input.protocolId}|${cont}`;
+}
+
 export async function selectSurfaceChannelForAttempt(input: {
   requestedModel: string;
   downstreamPolicy: DownstreamRoutingPolicy;
@@ -112,12 +196,91 @@ export async function selectSurfaceChannelForAttempt(input: {
   return await selectProxyChannelForAttempt(input);
 }
 
+/**
+ * Compose the sticky session key for a surface request.
+ *
+ * The function defines the **single, centralized priority order** between the
+ * protocol-level continuation key (introduced by the session-stick-routing
+ * feature) and the legacy CLI-level `clientContext.sessionId` key:
+ *
+ * 1. **Protocol-level path (preferred).** When the caller passes both
+ *    `parsedBody` (any value, including `null`) and a truthy `protocolHint`,
+ *    this function dispatches to the matching transformer-pure extractor
+ *    (`extractOpenAiResponsesSessionId` for `'openai/responses'`,
+ *    `extractAnthropicMessagesSessionId` for `'anthropic/messages'`). When the
+ *    extractor returns a non-null continuation identifier, the result of
+ *    {@link buildProtocolSessionKey} is returned (a string starting with
+ *    `proto-v1|...`).
+ *
+ * 2. **CLI-level fallback (legacy).** When the protocol-level path is not
+ *    available — that is, the caller did not pass `parsedBody` /
+ *    `protocolHint`, the `protocolHint` is falsy, the extractor returned
+ *    `null`, **or** the `buildProtocolSessionKey` call threw unexpectedly —
+ *    this function falls back to `proxyChannelCoordinator.buildStickySessionKey`
+ *    with the same inputs as before the feature was introduced. The return
+ *    value is byte-equivalent to the pre-feature behavior in this branch.
+ *
+ * Behavioural guarantees:
+ * - When the caller does **not** pass `parsedBody` or `protocolHint` (the
+ *   shape used by OpenAI Chat Completions and Gemini surfaces), the return
+ *   value is byte-equivalent to the pre-feature behavior.
+ * - The protocol-level branch never propagates an exception to the caller;
+ *   any unexpected throw from the extractors or `buildProtocolSessionKey` is
+ *   silently swallowed (no `console.warn` / `console.error`) and the function
+ *   degrades to the CLI-level fallback (Requirement 1.5).
+ *
+ * @see Requirements 1.5, 5.1, 5.2, 5.3, 5.4
+ */
 export function buildSurfaceStickySessionKey(input: {
   clientContext?: DownstreamClientContext | null;
   requestedModel: string;
   downstreamPath: string;
   downstreamApiKeyId?: number | null;
+  /**
+   * Already-parsed downstream request body. Only inspected when paired with a
+   * truthy `protocolHint`. When undefined (the legacy call shape), the
+   * function skips the protocol-level path entirely and degrades to CLI-level
+   * behavior.
+   */
+  parsedBody?: unknown;
+  /**
+   * Identifier of the downstream protocol whose extractor should be invoked
+   * to derive a continuation identifier. When `null` / `undefined` / empty
+   * the function skips the protocol-level path entirely and degrades to
+   * CLI-level behavior.
+   */
+  protocolHint?: 'openai/responses' | 'anthropic/messages' | null;
 }): string | null {
+  // Step 1 — Protocol-level priority.
+  // The protocol-level path is opt-in: callers that don't pass both
+  // `parsedBody` and a truthy `protocolHint` keep the legacy behavior.
+  if (input.parsedBody !== undefined && input.protocolHint) {
+    let continuationId: string | null = null;
+    if (input.protocolHint === 'openai/responses') {
+      continuationId = extractOpenAiResponsesSessionId(input.parsedBody);
+    } else if (input.protocolHint === 'anthropic/messages') {
+      continuationId = extractAnthropicMessagesSessionId(input.parsedBody);
+    }
+
+    if (continuationId !== null) {
+      try {
+        return buildProtocolSessionKey({
+          downstreamApiKeyId: input.downstreamApiKeyId,
+          downstreamPath: input.downstreamPath,
+          requestedModel: input.requestedModel,
+          protocolId: input.protocolHint,
+          continuationId,
+        });
+      } catch {
+        // Requirement 1.5: never let a protocol-level composition failure
+        // reject the request. Silently fall through to the CLI-level path
+        // below; do not log here because this branch is a defensive fallback,
+        // not a user-actionable error condition.
+      }
+    }
+  }
+
+  // Step 2 — CLI-level fallback (byte-equivalent to pre-feature behavior).
   return proxyChannelCoordinator.buildStickySessionKey({
     clientKind: input.clientContext?.clientKind || null,
     sessionId: input.clientContext?.sessionId || null,

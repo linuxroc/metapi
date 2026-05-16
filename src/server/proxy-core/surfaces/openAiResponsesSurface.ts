@@ -321,6 +321,8 @@ export async function handleOpenAiResponsesSurfaceRequest(
       requestedModel,
       downstreamPath,
       downstreamApiKeyId,
+      parsedBody: requestEnvelope.parsed.normalizedBody,
+      protocolHint: 'openai/responses',
     });
     const debugTrace = await startSurfaceProxyDebugTrace({
       downstreamPath,

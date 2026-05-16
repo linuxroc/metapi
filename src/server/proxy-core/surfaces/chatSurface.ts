@@ -201,6 +201,8 @@ export async function handleChatSurfaceRequest(
     requestedModel,
     downstreamPath,
     downstreamApiKeyId,
+    parsedBody: downstreamFormat === 'claude' ? claudeOriginalBody : undefined,
+    protocolHint: downstreamFormat === 'claude' ? 'anthropic/messages' : null,
   });
   const debugTrace = await startSurfaceProxyDebugTrace({
     downstreamPath,
@@ -1144,6 +1146,8 @@ export async function handleClaudeCountTokensSurfaceRequest(
     requestedModel,
     downstreamPath,
     downstreamApiKeyId,
+    parsedBody: rawBody,
+    protocolHint: 'anthropic/messages',
   });
   const debugTrace = await startSurfaceProxyDebugTrace({
     downstreamPath,
