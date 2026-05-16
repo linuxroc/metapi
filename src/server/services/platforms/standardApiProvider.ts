@@ -28,6 +28,65 @@ export function resolveVersionedModelsUrl(baseUrl: string): string {
   return `${normalized}/v1/models`;
 }
 
+/**
+ * Pure URL helper. Returns true iff `baseUrl` parses as a valid URL whose
+ * pathname (after stripping a single trailing slash) ends with a path
+ * segment that is exactly `anthropic` (case-insensitive).
+ *
+ * Match is purely on path segments — not on host, not as a substring or
+ * prefix. So `https://api.anthropic.com` (host-only) and
+ * `https://example.com/anthropic-proxy` / `/anthropicV2` (last segment is
+ * an extension of `anthropic`, not `anthropic` itself) are NOT recognized.
+ *
+ * This helper is intentionally opt-in — it is not invoked by any method
+ * on `StandardApiProviderAdapterBase`. Callers that want fallback semantics
+ * must invoke it explicitly.
+ */
+export function isAnthropicSuffixedBaseUrl(baseUrl: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(baseUrl);
+  } catch {
+    return false;
+  }
+  let path = parsed.pathname;
+  if (path.endsWith('/') && path !== '/') {
+    path = path.slice(0, -1);
+  }
+  if (path === '' || path === '/') {
+    return false;
+  }
+  const segments = path.split('/');
+  const last = segments[segments.length - 1] ?? '';
+  return last.toLowerCase() === 'anthropic';
+}
+
+/**
+ * Pure URL helper. When `isAnthropicSuffixedBaseUrl(baseUrl) === true`,
+ * returns the base URL with the trailing `/anthropic` segment (and its
+ * optional single trailing slash) stripped, then normalized via
+ * `normalizePlatformBaseUrl` so that its tail-slash form matches existing
+ * conventions. Otherwise returns `null`.
+ *
+ * Examples:
+ *   `https://example.com/anthropic`        → `https://example.com`
+ *   `https://example.com/anthropic/`       → `https://example.com`
+ *   `https://open.bigmodel.cn/api/anthropic` → `https://open.bigmodel.cn/api`
+ *   `https://api.anthropic.com`            → null (host-only)
+ *   `https://example.com/anthropic-proxy`  → null (last segment is not `anthropic`)
+ *
+ * Like its companion above, this helper is opt-in and is not invoked by
+ * any method on `StandardApiProviderAdapterBase`.
+ */
+export function stripAnthropicSuffixSegment(baseUrl: string): string | null {
+  if (!isAnthropicSuffixedBaseUrl(baseUrl)) {
+    return null;
+  }
+  const parsed = new URL(baseUrl);
+  parsed.pathname = parsed.pathname.replace(/\/anthropic\/?$/i, '');
+  return normalizePlatformBaseUrl(parsed.toString());
+}
+
 export abstract class StandardApiProviderAdapterBase extends BasePlatformAdapter {
   protected loginUnsupportedMessage = 'login endpoint not supported';
   protected checkinUnsupportedMessage = 'checkin endpoint not supported';

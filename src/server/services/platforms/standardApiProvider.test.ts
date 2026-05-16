@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   StandardApiProviderAdapterBase,
+  isAnthropicSuffixedBaseUrl,
   normalizePlatformBaseUrl,
   resolveVersionedModelsUrl,
+  stripAnthropicSuffixSegment,
 } from './standardApiProvider.js';
 
 class TestStandardApiProviderAdapter extends StandardApiProviderAdapterBase {
@@ -80,5 +82,110 @@ describe('standardApiProvider helpers', () => {
     await expect(adapter.fetchModelsForTest({
       baseUrl: 'https://api.example.com',
     })).rejects.toThrow('invalid standard models payload');
+  });
+});
+
+describe('isAnthropicSuffixedBaseUrl (Property 4)', () => {
+  // Validates: Requirements 2.3
+  // Property 4: any URL whose pathname's last segment is exactly `anthropic`
+  //             (case-insensitive, with optional single trailing slash) is
+  //             recognized as an Anthropic-suffixed base URL.
+  it.each([
+    'https://example.com/anthropic',
+    'https://example.com/anthropic/',
+    'https://example.com/api/anthropic',
+    'https://example.com/Anthropic',
+    'https://example.com/ANTHROPIC',
+    'https://example.com/AnThRoPiC',
+    'https://open.bigmodel.cn/api/anthropic',
+    'https://example.com:8443/api/anthropic',
+  ])('returns true for Anthropic-suffixed URL %s', (input) => {
+    expect(isAnthropicSuffixedBaseUrl(input)).toBe(true);
+  });
+
+  // Validates: Requirements 2.4, 2.5
+  // Negative equivalence classes:
+  //   - host-only (host name happens to contain `anthropic`)
+  //   - last segment is an extension of `anthropic` (prefix/suffix variants)
+  //   - mid-path matches but last segment is not `anthropic`
+  //   - empty / non-URL strings
+  it.each([
+    'https://api.anthropic.com',
+    'https://api.anthropic.com/',
+    'https://example.com/anthropic-proxy',
+    'https://example.com/anthropicV2',
+    'https://example.com/v1/anthropic-something',
+    'https://example.com/anthropic/v1',
+    'https://example.com',
+    'https://example.com/',
+    '',
+    'not a url',
+  ])('returns false for non-Anthropic-suffixed URL %s', (input) => {
+    expect(isAnthropicSuffixedBaseUrl(input)).toBe(false);
+  });
+});
+
+describe('stripAnthropicSuffixSegment (Property 8)', () => {
+  // Validates: Requirements 2.3, 8.3
+  // Property 8: stripping the trailing `/anthropic` segment yields the same
+  //             string as `normalizePlatformBaseUrl` of the parent input,
+  //             across hosts/ports, optional trailing slashes, and case.
+  it.each([
+    {
+      input: 'https://example.com/anthropic',
+      parent: 'https://example.com/',
+      expected: 'https://example.com',
+    },
+    {
+      input: 'https://example.com/anthropic/',
+      parent: 'https://example.com/',
+      expected: 'https://example.com',
+    },
+    {
+      input: 'https://example.com/api/anthropic',
+      parent: 'https://example.com/api',
+      expected: 'https://example.com/api',
+    },
+    {
+      input: 'https://open.bigmodel.cn/api/anthropic',
+      parent: 'https://open.bigmodel.cn/api',
+      expected: 'https://open.bigmodel.cn/api',
+    },
+    {
+      input: 'https://example.com/Anthropic',
+      parent: 'https://example.com/',
+      expected: 'https://example.com',
+    },
+    {
+      // The URL parser preserves port and query string while we strip only
+      // the trailing `/anthropic` segment from pathname. The query string
+      // survives the strip, so the assertion holds for the WHATWG-derived
+      // serialization observed at runtime.
+      input: 'https://example.com:8443/api/anthropic?x=1',
+      parent: 'https://example.com:8443/api?x=1',
+      expected: 'https://example.com:8443/api?x=1',
+    },
+  ])('strips trailing /anthropic segment for $input', ({ input, parent, expected }) => {
+    const actual = stripAnthropicSuffixSegment(input);
+    expect(actual).toBe(expected);
+    expect(actual).toBe(normalizePlatformBaseUrl(parent));
+  });
+
+  // Validates: Requirements 2.4, 2.5, 8.3
+  // Every input that `isAnthropicSuffixedBaseUrl` rejects must yield `null`
+  // here, so callers can use the result as a single-source-of-truth signal.
+  it.each([
+    'https://api.anthropic.com',
+    'https://api.anthropic.com/',
+    'https://example.com/anthropic-proxy',
+    'https://example.com/anthropicV2',
+    'https://example.com/v1/anthropic-something',
+    'https://example.com/anthropic/v1',
+    'https://example.com',
+    'https://example.com/',
+    '',
+    'not a url',
+  ])('returns null for non-Anthropic-suffixed URL %s', (input) => {
+    expect(stripAnthropicSuffixSegment(input)).toBeNull();
   });
 });
