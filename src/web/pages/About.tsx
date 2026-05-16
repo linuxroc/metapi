@@ -30,7 +30,7 @@ const TECH_STACK = [
 
 const LINKS = [
   { label: 'GitHub', href: 'https://github.com/cita-777/metapi', icon: '📂' },
-  { label: 'Docker Hub', href: 'https://hub.docker.com/r/1467078763/metapi', icon: '🐳' },
+  { label: 'Docker Hub', href: 'https://hub.docker.com/r/roclinux/metapi', icon: '🐳' },
   { label: '站点文档', href: SITE_DOCS_URL, icon: '📚' },
 ];
 

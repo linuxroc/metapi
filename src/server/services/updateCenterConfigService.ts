@@ -25,7 +25,7 @@ export function getDefaultUpdateCenterConfig(): UpdateCenterConfig {
     namespace: 'default',
     releaseName: '',
     chartRef: '',
-    imageRepository: '1467078763/metapi',
+    imageRepository: 'roclinux/metapi',
     githubReleasesEnabled: true,
     dockerHubTagsEnabled: true,
     defaultDeploySource: 'github-release',
