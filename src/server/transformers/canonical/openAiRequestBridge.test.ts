@@ -58,4 +58,39 @@ describe('openAiRequestBridge', () => {
       },
     });
   });
+
+  it('captures every image_url shape the Responses surface forwards into the canonical envelope', () => {
+    const request = canonicalRequestFromOpenAiBody({
+      body: {
+        model: 'gpt-5',
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'input_text', text: 'describe these' },
+              { type: 'input_image', image_url: 'https://example.com/cat.png' },
+              { type: 'input_image', image_url: { url: 'https://example.com/dog.png', detail: 'high' } },
+              { type: 'input_image', image_url: 'data:image/png;base64,iVBORw0KGgo=' },
+              { type: 'input_image', url: 'https://example.com/bird.png' },
+              { type: 'image_url', image_url: { url: 'https://example.com/fish.png' } },
+            ],
+          },
+        ],
+      },
+      surface: 'openai-responses',
+    });
+
+    const userMessage = request.messages[0];
+    expect(userMessage.role).toBe('user');
+    const imageUrls = userMessage.parts
+      .filter((part) => part.type === 'image')
+      .map((part) => (part as { url?: string }).url);
+    expect(imageUrls).toEqual([
+      'https://example.com/cat.png',
+      'https://example.com/dog.png',
+      'data:image/png;base64,iVBORw0KGgo=',
+      'https://example.com/bird.png',
+      'https://example.com/fish.png',
+    ]);
+  });
 });

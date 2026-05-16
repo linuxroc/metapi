@@ -882,7 +882,7 @@ describe('convertOpenAiBodyToResponsesBody', () => {
           },
           {
             type: 'image_url',
-            image_url: 'https://example.com/tool.png',
+            image_url: { url: 'https://example.com/tool.png' },
           },
         ],
       },
@@ -893,6 +893,55 @@ describe('convertOpenAiBodyToResponsesBody', () => {
           type: 'text',
           text: 'done',
         }],
+      },
+    ]);
+  });
+
+  it('wraps Responses input_image blocks into OpenAI chat image_url objects on Chat Completions fallback', () => {
+    const result = convertResponsesBodyToOpenAiBody(
+      {
+        model: 'gpt-5',
+        input: [
+          {
+            type: 'message',
+            role: 'user',
+            content: [
+              { type: 'input_text', text: 'describe' },
+              { type: 'input_image', image_url: 'https://example.com/cat.png' },
+              {
+                type: 'input_image',
+                image_url: { url: 'https://example.com/dog.png', detail: 'high' },
+              },
+              {
+                type: 'input_image',
+                image_url: 'data:image/png;base64,iVBORw0KGgo=',
+              },
+            ],
+          },
+        ],
+      },
+      'gpt-5',
+      false,
+    );
+
+    expect(result.messages).toEqual([
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'describe' },
+          {
+            type: 'image_url',
+            image_url: { url: 'https://example.com/cat.png' },
+          },
+          {
+            type: 'image_url',
+            image_url: { url: 'https://example.com/dog.png', detail: 'high' },
+          },
+          {
+            type: 'image_url',
+            image_url: { url: 'data:image/png;base64,iVBORw0KGgo=' },
+          },
+        ],
       },
     ]);
   });

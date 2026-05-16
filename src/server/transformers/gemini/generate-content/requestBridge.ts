@@ -57,6 +57,49 @@ function parseInlineDataUrl(url: string): { mimeType: string; data: string } | n
   };
 }
 
+function extractOpenAiImageUrl(item: Record<string, unknown>): string {
+  // Recognize every shape we accept at the OpenAI boundary so Gemini receives
+  // the image regardless of whether the downstream client sent OpenAI Chat
+  // ({ image_url: { url } }) or OpenAI Responses ({ image_url: 'string' }).
+  const directImageUrl = item.image_url;
+  if (typeof directImageUrl === 'string') {
+    const url = directImageUrl.trim();
+    if (url) return url;
+  } else if (isRecord(directImageUrl)) {
+    const nestedUrl = asTrimmedString(directImageUrl.url) || asTrimmedString(directImageUrl.image_url);
+    if (nestedUrl) return nestedUrl;
+  }
+  const fallbackUrl = item.url;
+  if (typeof fallbackUrl === 'string') {
+    const url = fallbackUrl.trim();
+    if (url) return url;
+  }
+  return '';
+}
+
+function buildGeminiImagePartFromOpenAi(item: Record<string, unknown>): Record<string, unknown> | null {
+  const imageUrl = extractOpenAiImageUrl(item);
+  if (!imageUrl) return null;
+
+  const parsedDataUrl = parseInlineDataUrl(imageUrl);
+  if (parsedDataUrl) {
+    return {
+      inlineData: {
+        mime_type: parsedDataUrl.mimeType,
+        data: parsedDataUrl.data,
+      },
+    };
+  }
+
+  // Remote https URLs and gs://... must round-trip through fileData so Gemini
+  // can fetch them; previously these were silently dropped.
+  return {
+    fileData: {
+      fileUri: imageUrl,
+    },
+  };
+}
+
 function normalizeFunctionResponseResult(value: unknown): unknown {
   if (typeof value !== 'string') return value;
   const trimmed = value.trim();
@@ -93,17 +136,9 @@ function convertOpenAiContentToGeminiParts(content: unknown): Array<Record<strin
       if (text) parts.push({ text });
       continue;
     }
-    if (type === 'image_url') {
-      const imageUrl = asTrimmedString(item.image_url && isRecord(item.image_url) ? item.image_url.url : item.url);
-      const parsed = imageUrl ? parseInlineDataUrl(imageUrl) : null;
-      if (parsed) {
-        parts.push({
-          inlineData: {
-            mime_type: parsed.mimeType,
-            data: parsed.data,
-          },
-        });
-      }
+    if (type === 'image_url' || type === 'input_image') {
+      const imagePart = buildGeminiImagePartFromOpenAi(item);
+      if (imagePart) parts.push(imagePart);
       continue;
     }
     if (type === 'input_audio') {

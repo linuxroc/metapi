@@ -40,6 +40,33 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
+function extractImageUrlFromContentItem(item: Record<string, unknown>): string {
+  // Handles every shape we see at the canonical boundary:
+  //   - OpenAI Chat:    { type:'image_url', image_url:{ url, detail? } }
+  //   - OpenAI Responses (string form):  { type:'input_image', image_url:'https://...' or 'data:...' }
+  //   - OpenAI Responses (object form):  { type:'input_image', image_url:{ url } }
+  //   - Loose variants that put the URL on item.url
+  // Without recognizing the string forms here, the image part silently dropped
+  // before any downstream protocol could see it (canonical envelope is the
+  // single source of truth for downstream conversion).
+  const directImageUrl = item.image_url;
+  if (typeof directImageUrl === 'string') {
+    const url = directImageUrl.trim();
+    if (url) return url;
+  } else if (isRecord(directImageUrl)) {
+    const nestedUrl = asTrimmedString(directImageUrl.url) || asTrimmedString(directImageUrl.image_url);
+    if (nestedUrl) return nestedUrl;
+  }
+
+  const fallbackUrl = item.url;
+  if (typeof fallbackUrl === 'string') {
+    const url = fallbackUrl.trim();
+    if (url) return url;
+  }
+
+  return '';
+}
+
 function cloneJsonValue<T>(value: T): T {
   if (Array.isArray(value)) {
     return value.map((item) => cloneJsonValue(item)) as T;
@@ -106,13 +133,8 @@ function openAiContentToCanonicalParts(content: unknown): CanonicalContentPart[]
       if (text) parts.push({ type: 'text', text, thought: true });
       continue;
     }
-    if (type === 'image_url' && isRecord(item.image_url)) {
-      const url = asTrimmedString(item.image_url.url);
-      if (url) parts.push({ type: 'image', url });
-      continue;
-    }
-    if (type === 'input_image' && isRecord(item.image_url)) {
-      const url = asTrimmedString(item.image_url.url);
+    if (type === 'image_url' || type === 'input_image') {
+      const url = extractImageUrlFromContentItem(item);
       if (url) parts.push({ type: 'image', url });
       continue;
     }

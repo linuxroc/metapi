@@ -818,6 +818,28 @@ function toOpenAiToolCall(item: Record<string, unknown>, fallbackIndex: number):
   };
 }
 
+function toOpenAiChatImageUrlBlock(rawImageUrl: unknown): Record<string, unknown> | null {
+  // Normalize Responses-style image_url (string or object) into the OpenAI Chat
+  // Completions shape: { type: 'image_url', image_url: { url, ...detail } }.
+  // Without this wrapping, downstream OpenAI-compatible upstreams silently drop
+  // the image during cross-protocol fallback (Responses -> Chat Completions).
+  if (typeof rawImageUrl === 'string') {
+    const url = rawImageUrl.trim();
+    return url ? { type: 'image_url', image_url: { url } } : null;
+  }
+
+  if (!isRecord(rawImageUrl)) return null;
+
+  const url = asTrimmedString(rawImageUrl.url) || asTrimmedString(rawImageUrl.image_url);
+  if (!url) return null;
+
+  const imageUrlPayload: Record<string, unknown> = { url };
+  const detail = asTrimmedString(rawImageUrl.detail);
+  if (detail) imageUrlPayload.detail = detail;
+
+  return { type: 'image_url', image_url: imageUrlPayload };
+}
+
 function normalizeOpenAiContentBlock(item: Record<string, unknown>): string | Record<string, unknown> | null {
   const type = asTrimmedString(item.type).toLowerCase();
   if (!type) {
@@ -837,12 +859,9 @@ function normalizeOpenAiContentBlock(item: Record<string, unknown>): string | Re
   }
 
   if (type === 'input_image') {
-    const imageUrl = item.image_url ?? item.url;
-    if (imageUrl === undefined) return null;
-    return {
-      type: 'image_url',
-      image_url: imageUrl,
-    };
+    const imageUrlBlock = toOpenAiChatImageUrlBlock(item.image_url ?? item.url);
+    if (!imageUrlBlock) return null;
+    return imageUrlBlock;
   }
 
   if (type === 'input_audio' && item.input_audio !== undefined) {

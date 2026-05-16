@@ -316,3 +316,39 @@ describe('gemini generate-content request bridge', () => {
     ]);
   });
 });
+describe('OpenAI -> Gemini image content forwarding', () => {
+  it('forwards every supported OpenAI image content shape into Gemini parts', () => {
+    const result = buildGeminiGenerateContentRequestFromOpenAi({
+      modelName: 'gemini-2.5-flash',
+      body: {
+        model: 'gemini-2.5-flash',
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'describe these' },
+              { type: 'image_url', image_url: { url: 'https://example.com/cat.png' } },
+              { type: 'input_image', image_url: 'https://example.com/dog.png' },
+              { type: 'input_image', image_url: { url: 'https://example.com/bird.png', detail: 'high' } },
+              { type: 'input_image', image_url: 'data:image/png;base64,iVBORw0KGgo=' },
+              { type: 'input_image', url: 'https://example.com/fish.png' },
+            ],
+          },
+        ],
+      },
+    });
+
+    const contents = result.contents as Array<Record<string, unknown>>;
+    const userMessage = contents.find((c) => c.role === 'user');
+    expect(userMessage).toBeTruthy();
+    const parts = userMessage!.parts as Array<Record<string, unknown>>;
+    expect(parts).toEqual([
+      { text: 'describe these' },
+      { fileData: { fileUri: 'https://example.com/cat.png' } },
+      { fileData: { fileUri: 'https://example.com/dog.png' } },
+      { fileData: { fileUri: 'https://example.com/bird.png' } },
+      { inlineData: { mime_type: 'image/png', data: 'iVBORw0KGgo=' } },
+      { fileData: { fileUri: 'https://example.com/fish.png' } },
+    ]);
+  });
+});
