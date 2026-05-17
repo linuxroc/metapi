@@ -59,6 +59,7 @@ describe('Settings proxy transport', () => {
       responsesCompactFallbackToResponsesEnabled: false,
       proxySessionChannelConcurrencyLimit: 4,
       proxySessionChannelQueueWaitMs: 3200,
+      proxyStickySessionEnabled: true,
       routingFallbackUnitCost: 1,
       routingWeights: {},
       adminIpAllowlist: [],
@@ -78,6 +79,7 @@ describe('Settings proxy transport', () => {
       responsesCompactFallbackToResponsesEnabled: true,
       proxySessionChannelConcurrencyLimit: 6,
       proxySessionChannelQueueWaitMs: 4200,
+      proxyStickySessionEnabled: true,
     });
     apiMock.getModelTokenCandidates.mockResolvedValue({ models: {} });
   });
@@ -157,6 +159,7 @@ describe('Settings proxy transport', () => {
         responsesCompactFallbackToResponsesEnabled: true,
         proxySessionChannelConcurrencyLimit: 6,
         proxySessionChannelQueueWaitMs: 4200,
+        proxyStickySessionEnabled: true,
       });
     } finally {
       root?.unmount();

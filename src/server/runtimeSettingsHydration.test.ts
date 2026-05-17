@@ -54,4 +54,43 @@ describe('applyRuntimeSettings', () => {
 
     expect(config.globalAllowedModels).toEqual(['model-alpha', 'model-beta', 'model-gamma']);
   });
+
+  it('hydrates proxyStickySessionEnabled from the settings map (UI toggle round-trip)', () => {
+    // Default config value is true (env PROXY_STICKY_SESSION_ENABLED defaults to true).
+    // Simulate the UI toggling sticky off and the value being persisted to the
+    // settings table, then a server restart reading the persisted value back.
+    config.proxyStickySessionEnabled = true;
+
+    applyRuntimeSettings(new Map([
+      ['proxy_sticky_session_enabled', JSON.stringify(false)],
+    ]));
+
+    expect(config.proxyStickySessionEnabled).toBe(false);
+
+    // And toggling it back on hydrates the true value again.
+    applyRuntimeSettings(new Map([
+      ['proxy_sticky_session_enabled', JSON.stringify(true)],
+    ]));
+
+    expect(config.proxyStickySessionEnabled).toBe(true);
+  });
+
+  it('ignores non-boolean proxy_sticky_session_enabled values', () => {
+    // Defensive: malformed persistence (e.g. a stale string value from a
+    // previous schema) MUST NOT silently coerce into truthy/falsy and must
+    // leave the existing config unchanged.
+    config.proxyStickySessionEnabled = true;
+
+    applyRuntimeSettings(new Map([
+      ['proxy_sticky_session_enabled', JSON.stringify('false')],
+    ]));
+
+    expect(config.proxyStickySessionEnabled).toBe(true);
+
+    applyRuntimeSettings(new Map([
+      ['proxy_sticky_session_enabled', JSON.stringify(0)],
+    ]));
+
+    expect(config.proxyStickySessionEnabled).toBe(true);
+  });
 });

@@ -55,6 +55,7 @@ describe('settings and auth events', () => {
     config.codexUpstreamWebsocketEnabled = false;
     config.proxySessionChannelConcurrencyLimit = 2;
     config.proxySessionChannelQueueWaitMs = 1500;
+    (config as any).proxyStickySessionEnabled = true;
     (config as any).proxyDebugTraceEnabled = false;
     (config as any).proxyDebugCaptureHeaders = true;
     (config as any).proxyDebugCaptureBodies = false;
@@ -165,6 +166,74 @@ describe('settings and auth events', () => {
     expect(savedWebsocket?.value).toBe(JSON.stringify(true));
     expect(savedConcurrency?.value).toBe(JSON.stringify(6));
     expect(savedQueueWait?.value).toBe(JSON.stringify(4200));
+  });
+
+  it('persists proxy sticky session enabled toggle round-trip', async () => {
+    // Default: sticky is on. The UI toggles it off. We expect:
+    //   - PUT response reflects the new value
+    //   - config.proxyStickySessionEnabled is mutated live (no restart)
+    //   - The settings table persists the value as JSON-encoded boolean
+    //     under the `proxy_sticky_session_enabled` key, so a server
+    //     restart can hydrate it back via runtimeSettingsHydration.
+    const turnOff = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: { proxyStickySessionEnabled: false },
+    });
+
+    expect(turnOff.statusCode).toBe(200);
+    const offBody = turnOff.json() as { proxyStickySessionEnabled?: boolean };
+    expect(offBody.proxyStickySessionEnabled).toBe(false);
+    expect((config as any).proxyStickySessionEnabled).toBe(false);
+
+    const savedOff = await db.select().from(schema.settings).where(eq(schema.settings.key, 'proxy_sticky_session_enabled')).get();
+    expect(savedOff?.value).toBe(JSON.stringify(false));
+
+    // Toggle back on; the row in the settings table is updated in place,
+    // not duplicated, so a subsequent hydration reads `true` again.
+    const turnOn = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: { proxyStickySessionEnabled: true },
+    });
+
+    expect(turnOn.statusCode).toBe(200);
+    const onBody = turnOn.json() as { proxyStickySessionEnabled?: boolean };
+    expect(onBody.proxyStickySessionEnabled).toBe(true);
+    expect((config as any).proxyStickySessionEnabled).toBe(true);
+
+    const savedOn = await db.select().from(schema.settings).where(eq(schema.settings.key, 'proxy_sticky_session_enabled')).get();
+    expect(savedOn?.value).toBe(JSON.stringify(true));
+
+    // The PUT also recorded a "运行时设置已更新" event each time, with
+    // the changed-label list mentioning sticky. Both calls should have
+    // produced exactly one event.
+    const events = await db.select().from(schema.events).all();
+    expect(events.length).toBe(2);
+    expect(events[0].message || '').toContain('会话粘连');
+    expect(events[1].message || '').toContain('会话粘连');
+  });
+
+  it('rejects non-boolean proxy sticky session toggle payloads', async () => {
+    // The toggle is a strict boolean; legacy "true"/"false" strings or
+    // numeric coercions are rejected with HTTP 400 to make persistence
+    // bugs obvious rather than silently coercing.
+    const stringRequest = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: { proxyStickySessionEnabled: 'true' },
+    });
+    expect(stringRequest.statusCode).toBe(400);
+
+    const numericRequest = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: { proxyStickySessionEnabled: 1 },
+    });
+    expect(numericRequest.statusCode).toBe(400);
+
+    // The original config value (true from beforeEach) is preserved.
+    expect((config as any).proxyStickySessionEnabled).toBe(true);
   });
 
   it('persists proxy debug runtime settings from runtime settings', async () => {
