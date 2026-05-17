@@ -58,6 +58,7 @@ interface RuntimeSettingsBody {
   disableCrossProtocolFallback?: boolean;
   proxySessionChannelConcurrencyLimit?: number;
   proxySessionChannelQueueWaitMs?: number;
+  proxyStickySessionEnabled?: boolean;
   proxyDebugTraceEnabled?: boolean;
   proxyDebugCaptureHeaders?: boolean;
   proxyDebugCaptureBodies?: boolean;
@@ -458,6 +459,14 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
       config.proxySessionChannelQueueWaitMs = Math.trunc(queueWaitMs);
       return;
     }
+    case 'proxy_sticky_session_enabled': {
+      try {
+        config.proxyStickySessionEnabled = parseBooleanFlag(value, '会话粘连开关');
+      } catch {
+        return;
+      }
+      return;
+    }
     case 'proxy_debug_trace_enabled': {
       try {
         config.proxyDebugTraceEnabled = parseBooleanFlag(value, '代理调试追踪开关');
@@ -727,6 +736,7 @@ function getRuntimeSettingsResponse(currentAdminIp = '') {
     disableCrossProtocolFallback: config.disableCrossProtocolFallback,
     proxySessionChannelConcurrencyLimit: config.proxySessionChannelConcurrencyLimit,
     proxySessionChannelQueueWaitMs: config.proxySessionChannelQueueWaitMs,
+    proxyStickySessionEnabled: config.proxyStickySessionEnabled,
     proxyDebugTraceEnabled: config.proxyDebugTraceEnabled,
     proxyDebugCaptureHeaders: config.proxyDebugCaptureHeaders,
     proxyDebugCaptureBodies: config.proxyDebugCaptureBodies,
@@ -1258,6 +1268,23 @@ export async function settingsRoutes(app: FastifyInstance) {
       }
       config.proxySessionChannelQueueWaitMs = nextQueueWaitMs;
       upsertSetting('proxy_session_channel_queue_wait_ms', config.proxySessionChannelQueueWaitMs);
+    }
+
+    if (body.proxyStickySessionEnabled !== undefined) {
+      let nextValue = false;
+      try {
+        nextValue = parseBooleanFlag(body.proxyStickySessionEnabled, '会话粘连开关');
+      } catch (err: any) {
+        return reply.code(400).send({
+          success: false,
+          message: err?.message || '会话粘连开关格式无效',
+        });
+      }
+      if (nextValue !== config.proxyStickySessionEnabled) {
+        changedLabels.push('会话粘连');
+      }
+      config.proxyStickySessionEnabled = nextValue;
+      upsertSetting('proxy_sticky_session_enabled', config.proxyStickySessionEnabled);
     }
 
     if (body.proxyDebugTraceEnabled !== undefined) {

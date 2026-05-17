@@ -73,6 +73,7 @@ type RuntimeSettings = {
   disableCrossProtocolFallback: boolean;
   proxySessionChannelConcurrencyLimit: number;
   proxySessionChannelQueueWaitMs: number;
+  proxyStickySessionEnabled: boolean;
   routingFallbackUnitCost: number;
   proxyFirstByteTimeoutSec: number;
   routeFailureCooldownMaxValue: number;
@@ -355,6 +356,7 @@ export default function Settings() {
     disableCrossProtocolFallback: false,
     proxySessionChannelConcurrencyLimit: 2,
     proxySessionChannelQueueWaitMs: 1500,
+    proxyStickySessionEnabled: true,
     routingFallbackUnitCost: 1,
     proxyFirstByteTimeoutSec: 0,
     routeFailureCooldownMaxValue: 30,
@@ -684,6 +686,7 @@ export default function Settings() {
         proxySessionChannelQueueWaitMs: Number(runtimeInfo.proxySessionChannelQueueWaitMs) >= 0
           ? Math.trunc(Number(runtimeInfo.proxySessionChannelQueueWaitMs))
           : 1500,
+        proxyStickySessionEnabled: runtimeInfo.proxyStickySessionEnabled !== false,
         routingFallbackUnitCost: Number(runtimeInfo.routingFallbackUnitCost) > 0
           ? Number(runtimeInfo.routingFallbackUnitCost)
           : 1,
@@ -895,6 +898,7 @@ export default function Settings() {
         responsesCompactFallbackToResponsesEnabled: runtime.responsesCompactFallbackToResponsesEnabled,
         proxySessionChannelConcurrencyLimit: runtime.proxySessionChannelConcurrencyLimit,
         proxySessionChannelQueueWaitMs: runtime.proxySessionChannelQueueWaitMs,
+        proxyStickySessionEnabled: runtime.proxyStickySessionEnabled,
       });
       setRuntime((prev) => ({
         ...prev,
@@ -910,6 +914,9 @@ export default function Settings() {
         proxySessionChannelQueueWaitMs: Number(res?.proxySessionChannelQueueWaitMs) >= 0
           ? Math.trunc(Number(res.proxySessionChannelQueueWaitMs))
           : prev.proxySessionChannelQueueWaitMs,
+        proxyStickySessionEnabled: typeof res?.proxyStickySessionEnabled === 'boolean'
+          ? res.proxyStickySessionEnabled
+          : prev.proxyStickySessionEnabled,
       }));
       toast.success('传输与会话并发设置已保存');
     } catch (err: any) {
@@ -1818,6 +1825,20 @@ export default function Settings() {
               type="checkbox"
               checked={runtime.responsesCompactFallbackToResponsesEnabled}
               onChange={(e) => setRuntime((prev) => ({ ...prev, responsesCompactFallbackToResponsesEnabled: e.target.checked }))}
+              style={{ width: 16, height: 16, marginTop: 2, flexShrink: 0 }}
+            />
+          </label>
+          <label style={settingsModernToggleStyle}>
+            <div style={settingsModernToggleCopyStyle}>
+              <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-text-secondary)' }}>启用会话粘连（Sticky Session）</span>
+              <span style={{ fontSize: 12, lineHeight: 1.7, color: 'var(--color-text-muted)' }}>
+                关闭后整个粘连机制失效（CLI 级 + 协议级 sticky 全部短路），下次请求仍按普通选择策略走，会话型账号不会被锁进 lease 池。
+              </span>
+            </div>
+            <input
+              type="checkbox"
+              checked={runtime.proxyStickySessionEnabled}
+              onChange={(e) => setRuntime((prev) => ({ ...prev, proxyStickySessionEnabled: e.target.checked }))}
               style={{ width: 16, height: 16, marginTop: 2, flexShrink: 0 }}
             />
           </label>

@@ -148,6 +148,11 @@ export function applyRuntimeSettings(settingsMap: Map<string, string>) {
     config.proxySessionChannelConcurrencyLimit = Math.trunc(proxySessionChannelConcurrencyLimit);
   }
 
+  const proxyStickySessionEnabled = parseSettingFromMap<boolean>(settingsMap, 'proxy_sticky_session_enabled');
+  if (typeof proxyStickySessionEnabled === 'boolean') {
+    config.proxyStickySessionEnabled = proxyStickySessionEnabled;
+  }
+
   const proxySessionChannelQueueWaitMs = parseSettingFromMap<number>(settingsMap, 'proxy_session_channel_queue_wait_ms');
   if (
     typeof proxySessionChannelQueueWaitMs === 'number'
