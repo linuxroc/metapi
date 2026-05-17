@@ -57,6 +57,7 @@ import { maybeHandleWebSearchOnlySimulation } from '../webSearchSimulation.js';
 import {
   acquireSurfaceChannelLease,
   bindSurfaceStickyChannel,
+  bindSurfaceStickyChannelFromResponse,
   buildSurfaceChannelBusyMessage,
   buildSurfaceStickySessionKey,
   clearSurfaceStickyChannel,
@@ -626,6 +627,15 @@ export async function handleChatSurfaceRequest(
             }
           },
         };
+        // P1 fix (spec session-stick-routing-binding-timing-fix): accumulate
+        // the latest object-shaped payload seen during streaming so that the
+        // success-terminal binding can re-key the protocol-level sticky map
+        // against the response-side `tool_use.id` (Anthropic Messages branch).
+        // Both `streamSession.run` paths (looksLikeResponsesSseText fallback
+        // and pure SSE) feed payloads here via `onParsedPayload`. The
+        // `streamSession.consumeUpstreamFinalPayload` path holds `fallbackData`
+        // directly and does not rely on this accumulator.
+        let lastResponseSidePayload: unknown = null;
         const streamSession = openAiChatTransformer.proxyStream.createSession({
           downstreamFormat,
           modelName,
@@ -634,6 +644,7 @@ export async function handleChatSurfaceRequest(
             if (payload && typeof payload === 'object') {
               upstreamUsagePresent = upstreamUsagePresent || hasProxyUsagePayload(payload);
               parsedUsage = mergeProxyUsage(parsedUsage, parseProxyUsage(payload));
+              lastResponseSidePayload = payload;
             }
           },
           writeLines,
@@ -701,6 +712,31 @@ export async function handleChatSurfaceRequest(
               stickySessionKey,
               selected,
             });
+            // P1 fix (spec session-stick-routing-binding-timing-fix):
+            // 仅在 Anthropic Messages 分支用响应侧 tool_use.id 重新绑定协议级 key。
+            // OpenAI Chat Completions 分支不参与协议级 sticky（spec
+            // session-stick-routing Requirement 10.4 显式 out of scope）。
+            // Cross-protocol fix: 用 `streamSession.getTerminalNormalizedFinal()`
+            // 拿到协议无关的 NormalizedFinalResponse（含 `toolCalls[].id`），
+            // 而不是单帧 `lastResponseSidePayload` —— 因为 SSE 协议下 tool_call.id
+            // 通常只在第一帧出现，单帧 payload 拿不到完整 id。
+            if (downstreamFormat === 'claude') {
+              const responsePayload = streamSession.getTerminalNormalizedFinal()
+                ?? lastResponseSidePayload;
+              if (responsePayload) {
+                bindSurfaceStickyChannelFromResponse({
+                  requestSideStickySessionKey: stickySessionKey,
+                  protocolHint: 'anthropic/messages',
+                  responsePayload,
+                  scope: {
+                    downstreamApiKeyId,
+                    downstreamPath,
+                    requestedModel,
+                  },
+                  selected,
+                });
+              }
+            }
             return;
           }
           let fallbackData: unknown = null;
@@ -801,6 +837,31 @@ export async function handleChatSurfaceRequest(
             stickySessionKey,
             selected,
           });
+          // P1 fix (spec session-stick-routing-binding-timing-fix):
+          // 仅在 Anthropic Messages 分支用响应侧 tool_use.id 重新绑定协议级 key。
+          // OpenAI Chat Completions 分支不参与协议级 sticky（spec
+          // session-stick-routing Requirement 10.4 显式 out of scope）。
+          // Cross-protocol fix: 用 `streamSession.getTerminalNormalizedFinal()`
+          // 拿到协议无关的 NormalizedFinalResponse（含 `toolCalls[].id`），
+          // 而不是单帧 `lastResponseSidePayload` —— 因为 SSE 协议下 tool_call.id
+          // 通常只在第一帧出现，单帧 payload 拿不到完整 id。
+          if (downstreamFormat === 'claude') {
+            const responsePayload = streamSession.getTerminalNormalizedFinal()
+              ?? lastResponseSidePayload;
+            if (responsePayload) {
+              bindSurfaceStickyChannelFromResponse({
+                requestSideStickySessionKey: stickySessionKey,
+                protocolHint: 'anthropic/messages',
+                responsePayload,
+                scope: {
+                  downstreamApiKeyId,
+                  downstreamPath,
+                  requestedModel,
+                },
+                selected,
+              });
+            }
+          }
           return;
         } else {
           const upstreamReader = getRuntimeResponseReader(upstream);
@@ -887,6 +948,30 @@ export async function handleChatSurfaceRequest(
           stickySessionKey,
           selected,
         });
+        // P1 fix (spec session-stick-routing-binding-timing-fix):
+        // 仅在 Anthropic Messages 分支用响应侧 tool_use.id 重新绑定协议级 key。
+        // OpenAI Chat Completions 分支不参与协议级 sticky（spec
+        // session-stick-routing Requirement 10.4 显式 out of scope）。
+        // Cross-protocol fix: 用 `streamSession.getTerminalNormalizedFinal()`
+        // 拿到协议无关的 NormalizedFinalResponse（含 `toolCalls[].id`），
+        // 而不是单帧 `lastResponseSidePayload`。
+        if (downstreamFormat === 'claude') {
+          const responsePayload = streamSession.getTerminalNormalizedFinal()
+            ?? lastResponseSidePayload;
+          if (responsePayload) {
+            bindSurfaceStickyChannelFromResponse({
+              requestSideStickySessionKey: stickySessionKey,
+              protocolHint: 'anthropic/messages',
+              responsePayload,
+              scope: {
+                downstreamApiKeyId,
+                downstreamPath,
+                requestedModel,
+              },
+              selected,
+            });
+          }
+        }
         return;
       }
 
@@ -985,6 +1070,27 @@ export async function handleChatSurfaceRequest(
         stickySessionKey,
         selected,
       });
+      // P1 fix (spec session-stick-routing-binding-timing-fix):
+      // 仅在 Anthropic Messages 分支用响应侧 tool_use.id 重新绑定协议级 key。
+      // OpenAI Chat Completions 分支不参与协议级 sticky（spec
+      // session-stick-routing Requirement 10.4 显式 out of scope）。
+      // Cross-protocol fix: 用 `normalizedFinal`（NormalizedFinalResponse），
+      // 而不是 raw `upstreamData` —— upstream 协议形态可能是 OpenAI Chat /
+      // OpenAI Responses，extractor 只看 Anthropic native `content[]` 或顶层
+      // `toolCalls[]`，传 normalized 形态命中 path 2 fallback。
+      if (downstreamFormat === 'claude') {
+        bindSurfaceStickyChannelFromResponse({
+          requestSideStickySessionKey: stickySessionKey,
+          protocolHint: 'anthropic/messages',
+          responsePayload: normalizedFinal,
+          scope: {
+            downstreamApiKeyId,
+            downstreamPath,
+            requestedModel,
+          },
+          selected,
+        });
+      }
 
       return reply.send(downstreamResponse);
     } catch (err: any) {
@@ -1430,6 +1536,10 @@ export async function handleClaudeCountTokensSurfaceRequest(
         stickySessionKey,
         selected,
       });
+      // 设计决策（spec session-stick-routing-binding-timing-fix design.md §3.2）：
+      // count_tokens 上游响应不产出新的 tool_use.id（只返回 token 计数），
+      // 因此本入口仅保留 CLI 级 sticky 回退（旧 bindSurfaceStickyChannel 调用），
+      // 不调用响应侧重新绑定 helper —— 即使调用也会因响应侧提取返回空数组而 noop。
       await finalizeDebugSuccess(
         upstream.status,
         upstreamRequest.path,

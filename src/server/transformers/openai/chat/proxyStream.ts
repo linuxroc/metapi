@@ -45,9 +45,16 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
     };
   const streamContext = downstreamTransformer.createStreamContext(input.modelName);
   const claudeContext = anthropicMessagesTransformer.createDownstreamContext();
-  const chatAggregateState = input.downstreamFormat === 'openai'
-    ? createOpenAiChatAggregateState()
-    : null;
+  // Aggregator state is initialized for both downstream formats: the
+  // OpenAI Chat upstream protocol is the only protocol the proxy stream
+  // currently knows how to consume, so even when the downstream
+  // serialization is Anthropic Messages we still need a place to capture
+  // tool_call IDs across SSE deltas (each delta typically only carries
+  // `id` on the first frame and `arguments` on subsequent frames).
+  // The OpenAI-Chat-only emit flush logic below is gated separately by
+  // `input.downstreamFormat === 'openai'`, so enabling the aggregator
+  // for `claude` does not change downstream byte output.
+  const chatAggregateState = createOpenAiChatAggregateState();
   let finalized = false;
   let terminalResult: ChatProxyStreamResult = {
     status: 'completed',
@@ -84,7 +91,7 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
   };
 
   const hasMeaningfulChatAggregateOutput = (): boolean => {
-    if (input.downstreamFormat !== 'openai' || !chatAggregateState) return false;
+    if (!chatAggregateState) return false;
     for (const choice of chatAggregateState.choices.values()) {
       if (choice.content.length > 0) return true;
       if (choice.reasoning.length > 0) return true;
@@ -248,6 +255,29 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
         input.onParsedPayload?.(parsedPayload);
       }
       if (consumed.handled) {
+        // P1 cross-protocol fix (spec session-stick-routing-binding-timing-fix):
+        // The native Anthropic SSE fast path forwards raw frames without
+        // going through `transformStreamEvent` / `applyOpenAiChatStreamEvent`,
+        // so the aggregator would otherwise miss `content_block_start`'s
+        // `content_block.id` (the `tool_use.id` carried only on the first
+        // frame of each tool block). Run the same normalize+aggregate that
+        // the slow path runs below, but discard the produced lines because
+        // the consumer has already serialized the original frame.
+        if (chatAggregateState && parsedPayload && typeof parsedPayload === 'object') {
+          try {
+            const normalizedEvent = anthropicMessagesTransformer.transformStreamEvent(
+              parsedPayload,
+              streamContext,
+              input.modelName,
+            );
+            applyOpenAiChatStreamEvent(chatAggregateState, normalizedEvent);
+          } catch {
+            // Defensive: never let aggregator bookkeeping disturb the
+            // user-facing stream. Failing aggregation just means the
+            // protocol-level sticky bind will fall back to the raw payload
+            // path in `bindSurfaceStickyChannelFromResponse`.
+          }
+        }
         input.writeLines(consumed.lines);
         return consumed.done;
       }
@@ -271,7 +301,13 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
         markFailed(parsedPayload);
       }
       const normalizedEvent = downstreamTransformer.transformStreamEvent(parsedPayload, streamContext, input.modelName);
-      if (input.downstreamFormat === 'openai' && chatAggregateState) {
+      // The aggregator is now always-on so that protocol-level sticky
+      // (P1 fix) can read tool_call.id snapshots from the terminal
+      // NormalizedFinalResponse regardless of downstream format. The
+      // Anthropic stream normalizer emits `toolCallDeltas` with `id`
+      // populated from `content_block_start.content_block.id`, which
+      // matches the OpenAI Chat aggregator's input contract.
+      if (chatAggregateState) {
         applyOpenAiChatStreamEvent(chatAggregateState, normalizedEvent);
       }
       emitLines(
@@ -296,6 +332,36 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
   };
 
   return {
+    /**
+     * Snapshot of the aggregated terminal NormalizedFinalResponse.
+     *
+     * Returns the response captured by `consumeUpstreamFinalPayload` when
+     * present (non-stream JSON terminal); otherwise materializes one from
+     * `chatAggregateState` if any meaningful aggregator output accumulated
+     * during streaming. Used by the protocol-level sticky bind (P1 fix in
+     * spec session-stick-routing-binding-timing-fix) to read response-side
+     * `toolCalls[]` IDs in a cross-protocol-safe way: the aggregator is
+     * fed by `applyOpenAiChatStreamEvent` regardless of upstream protocol,
+     * so OpenAI Chat / Anthropic Messages SSE deltas all surface their
+     * tool_call.id at this single capture point.
+     *
+     * Returns null when nothing meaningful aggregated (caller should
+     * skip the bind in that case).
+     */
+    getTerminalNormalizedFinal() {
+      if (terminalNormalizedFinal) return terminalNormalizedFinal;
+      if (!chatAggregateState || chatAggregateState.choices.size === 0) return null;
+      if (!hasMeaningfulChatAggregateOutput()) return null;
+      return finalizeOpenAiChatAggregate(chatAggregateState, {
+        id: streamContext.id,
+        model: streamContext.model,
+        created: streamContext.created,
+        content: '',
+        reasoningContent: '',
+        finishReason: 'stop',
+        toolCalls: [],
+      });
+    },
     consumeUpstreamFinalPayload(payload: unknown, fallbackText: string, response?: ResponseSink): ChatProxyStreamResult {
       if (payload && typeof payload === 'object') {
         input.onParsedPayload?.(payload);
@@ -320,6 +386,16 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
           { meaningful: true },
         );
       } else {
+        // Claude downstream: still capture a normalized snapshot for the
+        // protocol-level sticky bind to read tool_call.id from. Failures to
+        // normalize a non-OpenAI-Chat-shaped payload are non-fatal — the
+        // bind will simply fall back to the raw payload path in extractor.
+        try {
+          terminalNormalizedFinal = normalizeOpenAiChatFinalToNormalized(payload, input.modelName, fallbackText);
+        } catch {
+          // Defensive: never let normalization errors block the user-facing
+          // stream serialization that immediately follows.
+        }
         emitLines(
           anthropicMessagesTransformer.serializeUpstreamFinalAsStream(
             payload,

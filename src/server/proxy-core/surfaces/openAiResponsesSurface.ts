@@ -74,6 +74,7 @@ import { shouldAbortSameSiteEndpointFallback } from '../../services/proxyRetryPo
 import {
   acquireSurfaceChannelLease,
   bindSurfaceStickyChannel,
+  bindSurfaceStickyChannelFromResponse,
   buildSurfaceChannelBusyMessage,
   buildSurfaceStickySessionKey,
   clearSurfaceStickyChannel,
@@ -924,6 +925,16 @@ export async function handleOpenAiResponsesSurfaceRequest(
             promptTokensIncludeCache: null,
           };
           let upstreamUsagePresent = false;
+          // P1 fix (spec session-stick-routing-binding-timing-fix): accumulate
+          // the latest object-shaped payload seen during streaming so that the
+          // success-terminal binding can re-key the protocol-level sticky map
+          // against the response-side `response.id`. Both `streamSession.run`
+          // paths (websocket-replaces-SSE fallback at site 1, and pure SSE at
+          // site 4) feed payloads here via `onParsedPayload`. The
+          // `streamSession.consumeUpstreamFinalPayload` path (site 2) and the
+          // `websocketTransportRequest` collected-payload path (site 3) hold
+          // their payload directly and do not rely on this accumulator.
+          let lastResponseSidePayload: unknown = null;
           const writeLines = (lines: string[]) => {
             for (const line of lines) reply.raw.write(line);
           };
@@ -939,6 +950,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
                 if (codexSessionStoreKey) {
                   rememberCodexSessionResponseId(codexSessionStoreKey, payload);
                 }
+                lastResponseSidePayload = payload;
               }
             },
             writeLines,
@@ -989,6 +1001,23 @@ export async function handleOpenAiResponsesSurfaceRequest(
                 );
 	              bindSurfaceStickyChannel({
 	                stickySessionKey,
+	                selected,
+	              });
+	              // P1 fix (spec session-stick-routing-binding-timing-fix):
+	              // re-key the protocol-level sticky binding using the
+	              // response-side `response.id`. The accumulator captured the
+	              // latest object payload via `streamSession.onParsedPayload`,
+	              // which includes the `response.completed` event payload at
+	              // terminal success.
+	              bindSurfaceStickyChannelFromResponse({
+	                requestSideStickySessionKey: stickySessionKey,
+	                protocolHint: 'openai/responses',
+	                responsePayload: lastResponseSidePayload,
+	                scope: {
+	                  downstreamApiKeyId,
+	                  downstreamPath,
+	                  requestedModel,
+	                },
 	                selected,
 	              });
 	              return;
@@ -1083,6 +1112,21 @@ export async function handleOpenAiResponsesSurfaceRequest(
 	              stickySessionKey,
 	              selected,
 	            });
+	            // P1 fix (spec session-stick-routing-binding-timing-fix):
+	            // re-key the protocol-level sticky binding using the
+	            // response-side `response.id` carried in the parsed
+	            // upstream JSON payload.
+	            bindSurfaceStickyChannelFromResponse({
+	              requestSideStickySessionKey: stickySessionKey,
+	              protocolHint: 'openai/responses',
+	              responsePayload: upstreamData,
+	              scope: {
+	                downstreamApiKeyId,
+	                downstreamPath,
+	                requestedModel,
+	              },
+	              selected,
+	            });
 	            return;
 	          }
 
@@ -1123,6 +1167,21 @@ export async function handleOpenAiResponsesSurfaceRequest(
                 );
                 bindSurfaceStickyChannel({
                   stickySessionKey,
+                  selected,
+                });
+                // P1 fix (spec session-stick-routing-binding-timing-fix):
+                // re-key the protocol-level sticky binding using the
+                // response-side `response.id` carried in the collected
+                // SSE final payload (websocket-replaces-SSE transport).
+                bindSurfaceStickyChannelFromResponse({
+                  requestSideStickySessionKey: stickySessionKey,
+                  protocolHint: 'openai/responses',
+                  responsePayload: collectedPayload,
+                  scope: {
+                    downstreamApiKeyId,
+                    downstreamPath,
+                    requestedModel,
+                  },
                   selected,
                 });
                 return;
@@ -1237,6 +1296,23 @@ export async function handleOpenAiResponsesSurfaceRequest(
             );
 	          bindSurfaceStickyChannel({
 	            stickySessionKey,
+	            selected,
+	          });
+	          // P1 fix (spec session-stick-routing-binding-timing-fix):
+	          // re-key the protocol-level sticky binding using the
+	          // response-side `response.id`. The accumulator captured the
+	          // latest object payload via `streamSession.onParsedPayload`,
+	          // which includes the `response.completed` event payload at
+	          // terminal success.
+	          bindSurfaceStickyChannelFromResponse({
+	            requestSideStickySessionKey: stickySessionKey,
+	            protocolHint: 'openai/responses',
+	            responsePayload: lastResponseSidePayload,
+	            scope: {
+	              downstreamApiKeyId,
+	              downstreamPath,
+	              requestedModel,
+	            },
 	            selected,
 	          });
 	          return;
@@ -1355,6 +1431,21 @@ export async function handleOpenAiResponsesSurfaceRequest(
           );
 	        bindSurfaceStickyChannel({
 	          stickySessionKey,
+	          selected,
+	        });
+	        // P1 fix (spec session-stick-routing-binding-timing-fix):
+	        // re-key the protocol-level sticky binding using the
+	        // response-side `response.id` carried in the parsed
+	        // upstream JSON payload.
+	        bindSurfaceStickyChannelFromResponse({
+	          requestSideStickySessionKey: stickySessionKey,
+	          protocolHint: 'openai/responses',
+	          responsePayload: upstreamData,
+	          scope: {
+	            downstreamApiKeyId,
+	            downstreamPath,
+	            requestedModel,
+	          },
 	          selected,
 	        });
 	        return reply.send(downstreamData);

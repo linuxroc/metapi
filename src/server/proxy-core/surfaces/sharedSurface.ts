@@ -20,7 +20,12 @@ import { proxyChannelCoordinator } from '../../services/proxyChannelCoordinator.
 import { readRuntimeResponseText } from '../executors/types.js';
 import { selectProxyChannelForAttempt } from '../channelSelection.js';
 import { extractOpenAiResponsesSessionId } from '../../transformers/openai/responses/sessionId.js';
-import { extractAnthropicMessagesSessionId } from '../../transformers/anthropic/messages/sessionId.js';
+import { extractResponsesTerminalResponseId } from '../../transformers/openai/responses/continuation.js';
+import {
+  extractAnthropicMessagesSessionId,
+  extractAnthropicMessagesContinuationIdsFromResponse,
+} from '../../transformers/anthropic/messages/sessionId.js';
+import { config } from '../../config.js';
 
 type SelectedChannel = Awaited<ReturnType<typeof tokenRouter.selectChannel>>;
 type SurfaceWarningScope = 'chat' | 'responses';
@@ -254,7 +259,18 @@ export function buildSurfaceStickySessionKey(input: {
   // Step 1 — Protocol-level priority.
   // The protocol-level path is opt-in: callers that don't pass both
   // `parsedBody` and a truthy `protocolHint` keep the legacy behavior.
-  if (input.parsedBody !== undefined && input.protocolHint) {
+  //
+  // P2 fix (spec session-stick-routing-binding-timing-fix): the protocol-level
+  // branch must respect the `proxyStickySessionEnabled` global switch, matching
+  // the CLI-level `proxyChannelCoordinator.buildStickySessionKey` semantics.
+  // When the switch is off both paths return null so no `proto-v1|...` key
+  // can leak into `acquireSurfaceChannelLease`'s per-channel lease pool and
+  // lock session-scoped accounts against the user's intent.
+  if (
+    config.proxyStickySessionEnabled
+    && input.parsedBody !== undefined
+    && input.protocolHint
+  ) {
     let continuationId: string | null = null;
     if (input.protocolHint === 'openai/responses') {
       continuationId = extractOpenAiResponsesSessionId(input.parsedBody);
@@ -309,12 +325,187 @@ export function bindSurfaceStickyChannel(input: {
   );
 }
 
+/**
+ * Input shape for {@link bindSurfaceStickyChannelFromResponse}.
+ *
+ * The "from response" binding is the P1 fix of spec
+ * session-stick-routing-binding-timing-fix: rather than binding the
+ * request-side sticky session key (which is *the previous round's*
+ * response continuation ID—too late for the current round to be useful),
+ * this API extracts the **current round's** newly-produced continuation
+ * ID from the upstream response payload and uses it as the binding key.
+ *
+ * Caller contract:
+ * - `requestSideStickySessionKey` is the value returned earlier by
+ *   `buildSurfaceStickySessionKey`, used here only as a read-only signal
+ *   for diagnostics — it is NOT used as a guard. Round 1 of a fresh
+ *   conversation has no request-side continuation (`previous_response_id`
+ *   / `tool_result.tool_use_id` are absent), so the request-side key is
+ *   either `null` or a CLI-level fallback. In both cases the response
+ *   carries the ID round 2 will use, so this function still binds. The
+ *   protocol-level write coexists with whatever {@link bindSurfaceStickyChannel}
+ *   wrote for the CLI-level key — they target distinct keyspaces and
+ *   never collide.
+ * - `responsePayload` should be the aggregated/parsed upstream response
+ *   for the current round. Both the OpenAI Responses extractor
+ *   (`extractResponsesTerminalResponseId`) and the new Anthropic Messages
+ *   extractor (`extractAnthropicMessagesContinuationIdsFromResponse`)
+ *   tolerate every shape the surface might forward (raw JSON terminal,
+ *   aggregated SSE final payload, NormalizedFinalResponse).
+ * - `scope` mirrors the request-side scope tuple. The composed write key
+ *   reuses {@link buildProtocolSessionKey} so the bytewise format is
+ *   identical to the request-side query key for the next round.
+ * - `selected` is the channel actually serving this request to terminal
+ *   success. On retries that switched channels, this is the new channel,
+ *   so the bind correctly overwrites any stale binding.
+ */
+export type SurfaceBindFromResponseInput = {
+  requestSideStickySessionKey?: string | null;
+  protocolHint: 'openai/responses' | 'anthropic/messages';
+  responsePayload: unknown;
+  scope: {
+    downstreamApiKeyId?: number | null;
+    downstreamPath: string;
+    requestedModel: string;
+  };
+  selected: {
+    channel: { id: number };
+    account?: { extraConfig?: string | null; oauthProvider?: string | null } | null;
+  };
+};
+
+/**
+ * Bind the surface sticky channel using a continuation identifier extracted
+ * from the **response** payload (P1 fix of spec
+ * session-stick-routing-binding-timing-fix).
+ *
+ * Unlike the legacy {@link bindSurfaceStickyChannel}, which writes whatever
+ * key the request-side `buildSurfaceStickySessionKey` produced, this function
+ * derives a fresh `proto-v1|...` key from the **current round's** newly
+ * generated upstream continuation ID (`response.id` for OpenAI Responses,
+ * the last `tool_use.id` in document order for Anthropic Messages). That key
+ * matches what the next request will carry as `previous_response_id` /
+ * `tool_result.tool_use_id`, so the next round actually hits sticky.
+ *
+ * Behavioural guarantees:
+ * - Returns silently (no-op) when `proxyStickySessionEnabled` is false,
+ *   matching the P2 switch semantics enforced in
+ *   {@link buildSurfaceStickySessionKey}.
+ * - Always attempts the bind regardless of whether
+ *   `requestSideStickySessionKey` is `null`, a CLI-level key, or an
+ *   already-protocol-level key. The protocol-level write key is always
+ *   freshly composed from the response-side extractor output, so it
+ *   never collides with the CLI-level key written by
+ *   {@link bindSurfaceStickyChannel} (the two go to disjoint keyspaces).
+ *   Round 1 of a fresh session — when the request carried no continuation
+ *   ID — must still bind because the response produces the ID that
+ *   round 2 will use as its `previous_response_id` / `tool_result.tool_use_id`.
+ * - Returns silently when the response-side extractor produces no IDs.
+ *   Critically does NOT fall back to `requestSideStickySessionKey` as a
+ *   write key, because that is the exact bug P1 is fixing.
+ * - Never throws into the surface caller; defensive try/catch absorbs any
+ *   unexpected extractor or coordinator error.
+ *
+ * @see spec `session-stick-routing-binding-timing-fix`
+ *      bugfix.md Expected 2.1, 2.2, 2.3, 2.4
+ *      design.md §2.2
+ */
+export function bindSurfaceStickyChannelFromResponse(
+  input: SurfaceBindFromResponseInput,
+): void {
+  // 0. P2 switch consistency: short-circuit when sticky is globally off.
+  if (!config.proxyStickySessionEnabled) return;
+
+  // 1. The protocol-level write key always uses the response-side ID;
+  //    the request-side key is informational only. We deliberately do
+  //    NOT early-return on a CLI-level / null request-side key: round 1
+  //    of a fresh session has no request-side continuation yet, but the
+  //    response carries the ID that round 2 will use to look this binding
+  //    up. The CLI-level legacy bind written by `bindSurfaceStickyChannel`
+  //    targets a different keyspace and never collides with the
+  //    `proto-v1|...` key written here.
+  void input.requestSideStickySessionKey;
+
+  try {
+    // 2. Dispatch to the matching response-side extractor.
+    let continuationIdToBind: string | null = null;
+    if (input.protocolHint === 'openai/responses') {
+      continuationIdToBind = extractResponsesTerminalResponseId(input.responsePayload);
+    } else if (input.protocolHint === 'anthropic/messages') {
+      const ids = extractAnthropicMessagesContinuationIdsFromResponse(input.responsePayload);
+      // Mirror the request-side "last in document order" rule: the response
+      // array's last `tool_use.id` is what the next request will echo back
+      // as `tool_result.tool_use_id` for the same turn boundary.
+      continuationIdToBind = ids.length > 0 ? ids[ids.length - 1] : null;
+    }
+
+    // 3. No usable response-side ID -> do not write. We must NOT fall back
+    //    to `requestSideStickySessionKey`; that is precisely the bug P1
+    //    fixes (writing the previous round's key as if it were this round's).
+    if (continuationIdToBind === null || continuationIdToBind.length === 0) return;
+
+    // 4. Compose the response-side write key and bind via the coordinator.
+    const responseSideKey = buildProtocolSessionKey({
+      downstreamApiKeyId: input.scope.downstreamApiKeyId,
+      downstreamPath: input.scope.downstreamPath,
+      requestedModel: input.scope.requestedModel,
+      protocolId: input.protocolHint,
+      continuationId: continuationIdToBind,
+    });
+
+    proxyChannelCoordinator.bindStickyChannel(
+      responseSideKey,
+      input.selected.channel.id,
+      input.selected.account || undefined,
+    );
+  } catch {
+    // Defensive last line of defence: this function promises never to
+    // propagate exceptions to the surface caller. The transformer-pure
+    // extractors already guard against malformed inputs, so reaching this
+    // catch is unexpected; silently swallow and fall through to no-op.
+  }
+}
+
+/**
+ * Clear a surface sticky channel binding.
+ *
+ * P3 fix (spec session-stick-routing-binding-timing-fix): protocol-level
+ * keys (i.e. those starting with `proto-v1|`) MUST NOT be cleared on
+ * single-request failure. This honors:
+ *   - spec session-stick-routing Requirement 6.4: a single failed attempt
+ *     does not clear protocol-level sticky bindings; they remain until TTL
+ *     expiry or overwrite by a subsequent successful response (via
+ *     {@link bindSurfaceStickyChannelFromResponse}).
+ *   - spec session-stick-routing Requirement 8.4 / Property 7: the only
+ *     allowed protocol-level clear is via `proxyChannelCoordinator`'s
+ *     internal "refresh-failed" branch, never via surface failure paths
+ *     (lease timeout, streamFailed, detectProxyFailure, top-level catch).
+ *
+ * CLI-level keys (those derived from `clientContext.sessionId` by
+ * `proxyChannelCoordinator.buildStickySessionKey`) keep the pre-feature
+ * clear-on-failure semantics intact: surface code paths that historically
+ * cleared the binding to let the next request re-pick still work as before.
+ *
+ * The function signature is unchanged so that the ~16 call sites scattered
+ * across `openAiResponsesSurface.ts` and `chatSurface.ts` need no edits.
+ *
+ * @see bugfix.md Expected 2.7, 2.8, Unchanged 3.6, 3.14
+ *      design.md §2.3
+ */
 export function clearSurfaceStickyChannel(input: {
   stickySessionKey?: string | null;
   selected: {
     channel: { id: number };
   };
 }): void {
+  if (!input.stickySessionKey) return;
+
+  // P3 fix: protocol-level keys honor spec session-stick-routing
+  // Requirement 6.4 + 8.4 (single-failure does not clear sticky). Wait for
+  // either TTL expiry or overwrite by a subsequent successful response.
+  if (input.stickySessionKey.startsWith('proto-v1|')) return;
+
+  // CLI-level keys retain pre-feature clear-on-failure semantics.
   proxyChannelCoordinator.clearStickyChannel(
     input.stickySessionKey,
     input.selected.channel.id,
