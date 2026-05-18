@@ -128,10 +128,69 @@ function resolveStoredProfile(): UserProfile {
   }
 }
 
+const TURNSTILE_SCRIPT_URL = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
+const TURNSTILE_SCRIPT_ID = 'metapi-turnstile-script';
+
+type TurnstileGlobal = {
+  render: (
+    container: HTMLElement,
+    options: {
+      sitekey: string;
+      callback?: (token: string) => void;
+      'error-callback'?: () => void;
+      'expired-callback'?: () => void;
+      theme?: 'light' | 'dark' | 'auto';
+    },
+  ) => string;
+  remove: (widgetId: string) => void;
+  reset: (widgetId?: string) => void;
+};
+
+declare global {
+  interface Window {
+    turnstile?: TurnstileGlobal;
+  }
+}
+
+function ensureTurnstileScriptLoaded(): Promise<TurnstileGlobal> {
+  if (typeof window === 'undefined') {
+    return Promise.reject(new Error('window unavailable'));
+  }
+  if (window.turnstile) return Promise.resolve(window.turnstile);
+
+  return new Promise((resolve, reject) => {
+    const existing = document.getElementById(TURNSTILE_SCRIPT_ID) as HTMLScriptElement | null;
+    if (existing) {
+      existing.addEventListener('load', () => {
+        if (window.turnstile) resolve(window.turnstile);
+        else reject(new Error('turnstile global missing after script load'));
+      });
+      existing.addEventListener('error', () => reject(new Error('turnstile script load failed')));
+      return;
+    }
+    const script = document.createElement('script');
+    script.id = TURNSTILE_SCRIPT_ID;
+    script.src = TURNSTILE_SCRIPT_URL;
+    script.async = true;
+    script.defer = true;
+    script.addEventListener('load', () => {
+      if (window.turnstile) resolve(window.turnstile);
+      else reject(new Error('turnstile global missing after script load'));
+    });
+    script.addEventListener('error', () => reject(new Error('turnstile script load failed')));
+    document.head.appendChild(script);
+  });
+}
+
 export function Login({ onLogin, t }: { onLogin: (token: string) => void; t: (text: string) => string }) {
   const [token, setToken] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [turnstileSiteKey, setTurnstileSiteKey] = useState<string | null>(null);
+  const [turnstileToken, setTurnstileToken] = useState('');
+  const [turnstileWidgetReady, setTurnstileWidgetReady] = useState(false);
+  const turnstileContainerRef = useRef<HTMLDivElement | null>(null);
+  const turnstileWidgetIdRef = useRef<string | null>(null);
   const capabilityRows = [
     {
       title: t('统一代理网关'),
@@ -147,16 +206,101 @@ export function Login({ onLogin, t }: { onLogin: (token: string) => void; t: (te
     },
   ];
 
+  // Load Turnstile config once on mount. Empty/missing site key disables
+  // the widget and the login flow proceeds exactly as before.
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/auth/turnstile-config')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { enabled?: boolean; siteKey?: string } | null) => {
+        if (cancelled) return;
+        if (data && data.enabled === true && typeof data.siteKey === 'string' && data.siteKey.length > 0) {
+          setTurnstileSiteKey(data.siteKey);
+        } else {
+          setTurnstileSiteKey('');
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setTurnstileSiteKey('');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Mount the Turnstile widget once we know the site key.
+  useEffect(() => {
+    if (!turnstileSiteKey) return;
+    let cancelled = false;
+    ensureTurnstileScriptLoaded()
+      .then((turnstile) => {
+        if (cancelled) return;
+        const container = turnstileContainerRef.current;
+        if (!container) return;
+        // Remove any prior widget (e.g. fast-refresh re-render).
+        if (turnstileWidgetIdRef.current) {
+          try { turnstile.remove(turnstileWidgetIdRef.current); } catch { /* noop */ }
+          turnstileWidgetIdRef.current = null;
+        }
+        const widgetId = turnstile.render(container, {
+          sitekey: turnstileSiteKey,
+          theme: 'auto',
+          callback: (cfToken: string) => {
+            setTurnstileToken(cfToken);
+          },
+          'error-callback': () => {
+            setTurnstileToken('');
+          },
+          'expired-callback': () => {
+            setTurnstileToken('');
+          },
+        });
+        turnstileWidgetIdRef.current = widgetId;
+        setTurnstileWidgetReady(true);
+      })
+      .catch(() => {
+        if (!cancelled) setError(t('无法加载人机验证组件'));
+      });
+
+    return () => {
+      cancelled = true;
+      const turnstile = window.turnstile;
+      if (turnstile && turnstileWidgetIdRef.current) {
+        try { turnstile.remove(turnstileWidgetIdRef.current); } catch { /* noop */ }
+      }
+      turnstileWidgetIdRef.current = null;
+      setTurnstileWidgetReady(false);
+    };
+  }, [turnstileSiteKey, t]);
+
+  const turnstileEnabled = !!turnstileSiteKey;
+  const turnstileBlocking = turnstileEnabled && !turnstileToken;
+
   const handleLogin = async () => {
-    if (!token) return;
+    // Trim once, use everywhere: server compares against the trimmed
+    // token, so saving the un-trimmed version to localStorage would
+    // make the very next /api/* request fail and bounce back to the
+    // login page.
+    const normalizedToken = token.trim();
+    if (!normalizedToken) return;
+    if (turnstileBlocking) {
+      setError(t('请先完成人机验证'));
+      return;
+    }
     setLoading(true);
     setError('');
     try {
-      const res = await fetch('/api/settings/auth/info', {
-        headers: { Authorization: `Bearer ${token}` },
+      const requestBody: Record<string, string> = { token: normalizedToken };
+      if (turnstileEnabled && turnstileToken) {
+        requestBody.turnstileToken = turnstileToken;
+      }
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(requestBody),
       });
       if (res.ok) {
-        onLogin(token);
+        onLogin(normalizedToken);
       } else {
         let reason = '';
         try {
@@ -174,10 +318,23 @@ export function Login({ onLogin, t }: { onLogin: (token: string) => void; t: (te
         } catch { }
         setError(t(resolveLoginErrorMessage(res.status, reason)));
         setLoading(false);
+        // Reset the Turnstile widget on failure: tokens are single-use.
+        if (turnstileEnabled) {
+          setTurnstileToken('');
+          if (window.turnstile && turnstileWidgetIdRef.current) {
+            try { window.turnstile.reset(turnstileWidgetIdRef.current); } catch { /* noop */ }
+          }
+        }
       }
     } catch {
       setError(t('无法连接到服务器'));
       setLoading(false);
+      if (turnstileEnabled) {
+        setTurnstileToken('');
+        if (window.turnstile && turnstileWidgetIdRef.current) {
+          try { window.turnstile.reset(turnstileWidgetIdRef.current); } catch { /* noop */ }
+        }
+      }
     }
   };
 
@@ -263,9 +420,21 @@ export function Login({ onLogin, t }: { onLogin: (token: string) => void; t: (te
                 {error}
               </div>
             )}
+            {turnstileEnabled && (
+              <div
+                ref={turnstileContainerRef}
+                style={{
+                  marginBottom: 12,
+                  minHeight: turnstileWidgetReady ? undefined : 65,
+                  display: 'flex',
+                  justifyContent: 'center',
+                }}
+                aria-label={t('人机验证')}
+              />
+            )}
             <button
               onClick={handleLogin}
-              disabled={loading || !token}
+              disabled={loading || !token.trim() || turnstileBlocking}
               className="btn btn-primary login-auth-submit"
             >
               {loading ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} />{t('验证中...')}</> : t('登录')}
