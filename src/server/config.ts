@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import type { FastifyServerOptions } from 'fastify';
 import { normalizePayloadRulesConfig } from './services/payloadRules.js';
+import { isCheckinScheduleMode, type CheckinScheduleMode } from './shared/checkinSchedule.js';
 
 const DEFAULT_REQUEST_BODY_LIMIT = 20 * 1024 * 1024;
 const DEFAULT_CODEX_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
@@ -63,6 +64,11 @@ function parseListenHost(env: NodeJS.ProcessEnv): string {
   return (env.HOST || '0.0.0.0').trim() || '0.0.0.0';
 }
 
+function parseCheckinScheduleMode(value: string | undefined): CheckinScheduleMode {
+  const normalized = (value || 'random').trim().toLowerCase();
+  return isCheckinScheduleMode(normalized) ? normalized : 'random';
+}
+
 export function buildConfig(env: NodeJS.ProcessEnv) {
   const dataDir = env.DATA_DIR || './data';
 
@@ -80,9 +86,7 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     systemProxyUrl: env.SYSTEM_PROXY_URL || '',
     accountCredentialSecret: env.ACCOUNT_CREDENTIAL_SECRET || env.AUTH_TOKEN || 'change-me-admin-token',
     checkinCron: env.CHECKIN_CRON || '0 8 * * *',
-    checkinScheduleMode: (env.CHECKIN_SCHEDULE_MODE || 'cron').trim().toLowerCase() === 'interval'
-      ? 'interval' as const
-      : 'cron' as const,
+    checkinScheduleMode: parseCheckinScheduleMode(env.CHECKIN_SCHEDULE_MODE),
     checkinIntervalHours: Math.min(24, Math.max(1, Math.trunc(parseNumber(env.CHECKIN_INTERVAL_HOURS, 6)))),
     balanceRefreshCron: env.BALANCE_REFRESH_CRON || '0 * * * *',
     logCleanupCron: env.LOG_CLEANUP_CRON || '0 6 * * *',

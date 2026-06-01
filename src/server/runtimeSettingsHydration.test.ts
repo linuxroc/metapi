@@ -55,6 +55,16 @@ describe('applyRuntimeSettings', () => {
     expect(config.globalAllowedModels).toEqual(['model-alpha', 'model-beta', 'model-gamma']);
   });
 
+  it('hydrates random checkin schedule mode', () => {
+    config.checkinScheduleMode = 'cron';
+
+    applyRuntimeSettings(new Map([
+      ['checkin_schedule_mode', JSON.stringify('random')],
+    ]));
+
+    expect(config.checkinScheduleMode).toBe('random');
+  });
+
   it('hydrates proxyStickySessionEnabled from the settings map (UI toggle round-trip)', () => {
     // Default config value is true (env PROXY_STICKY_SESSION_ENABLED defaults to true).
     // Simulate the UI toggling sticky off and the value being persisted to the

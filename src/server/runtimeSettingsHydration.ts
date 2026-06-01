@@ -3,6 +3,7 @@ import {
   normalizeTokenRouterFailureCooldownMaxSec,
 } from './config.js';
 import { normalizePayloadRulesConfig } from './services/payloadRules.js';
+import { isCheckinScheduleMode } from './shared/checkinSchedule.js';
 import { normalizeLogCleanupRetentionDays } from './shared/logCleanupRetentionDays.js';
 
 export function parseSettingFromMap<T>(settingsMap: Map<string, string>, key: string): T | undefined {
@@ -109,7 +110,7 @@ export function applyRuntimeSettings(settingsMap: Map<string, string>) {
   if (typeof checkinCron === 'string' && checkinCron) config.checkinCron = checkinCron;
 
   const checkinScheduleMode = parseSettingFromMap<string>(settingsMap, 'checkin_schedule_mode');
-  if (checkinScheduleMode === 'cron' || checkinScheduleMode === 'interval') {
+  if (isCheckinScheduleMode(checkinScheduleMode)) {
     config.checkinScheduleMode = checkinScheduleMode;
   }
 

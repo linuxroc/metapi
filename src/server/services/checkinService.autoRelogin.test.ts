@@ -305,6 +305,40 @@ describe('checkinService auto relogin', () => {
     expect(updateSetMock).toHaveBeenCalledWith(expect.objectContaining({ lastCheckinAt: expect.any(String) }));
   });
 
+  it('disables future automatic checkins after a real failure', async () => {
+    selectAllMock.mockReturnValue([
+      {
+        accounts: {
+          id: 19,
+          username: 'failing-user',
+          accessToken: 'token',
+          status: 'active',
+          extraConfig: null,
+        },
+        sites: {
+          id: 19,
+          name: 'demo',
+          url: 'https://example.com',
+          platform: 'new-api',
+        },
+      },
+    ]);
+
+    adapterMock.checkin.mockResolvedValue({ success: false, message: 'checkin failed' });
+
+    const { checkinAccount } = await import('./checkinService.js');
+    const result = await checkinAccount(19, { scheduleMode: 'random' });
+
+    expect(result.success).toBe(false);
+    expect(result.status).toBe('failed');
+    expect(updateSetMock).toHaveBeenCalledWith(expect.objectContaining({
+      checkinEnabled: false,
+      updatedAt: expect.any(String),
+    }));
+    const firstInsertPayload = insertValuesMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(firstInsertPayload?.status).toBe('failed');
+  });
+
   it('treats unsupported checkin endpoint responses as skipped', async () => {
     selectAllMock.mockReturnValue([
       {

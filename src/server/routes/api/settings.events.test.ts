@@ -136,6 +136,42 @@ describe('settings and auth events', () => {
     expect(savedInterval?.value).toBe(JSON.stringify(8));
   });
 
+  it('persists and returns random checkin schedule mode from runtime settings', async () => {
+    const updateResponse = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        checkinScheduleMode: 'random',
+        checkinCron: '0 8 * * *',
+      },
+    });
+
+    expect(updateResponse.statusCode).toBe(200);
+    const updated = updateResponse.json() as { checkinScheduleMode?: string };
+    expect(updated.checkinScheduleMode).toBe('random');
+    expect(config.checkinScheduleMode).toBe('random');
+
+    const savedMode = await db.select().from(schema.settings).where(eq(schema.settings.key, 'checkin_schedule_mode')).get();
+    expect(savedMode?.value).toBe(JSON.stringify('random'));
+  });
+
+  it('does not mutate checkin schedule mode when interval validation fails', async () => {
+    const response = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        checkinScheduleMode: 'random',
+        checkinIntervalHours: 0,
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(config.checkinScheduleMode).toBe('cron');
+
+    const savedMode = await db.select().from(schema.settings).where(eq(schema.settings.key, 'checkin_schedule_mode')).get();
+    expect(savedMode).toBeFalsy();
+  });
+
   it('persists codex upstream websocket and session lease settings from runtime settings', async () => {
     const updateResponse = await app.inject({
       method: 'PUT',

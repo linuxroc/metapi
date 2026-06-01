@@ -42,6 +42,7 @@ const ROUTE_COOLDOWN_UNIT_OPTIONS = [
   { value: 'day', label: '天', multiplierSec: SECONDS_PER_DAY },
 ] as const;
 const CHECKIN_SCHEDULE_MODE_OPTIONS = [
+  { value: 'random', label: '随机签到' },
   { value: 'cron', label: 'Cron' },
   { value: 'interval', label: '间隔签到' },
 ] as const;
@@ -53,6 +54,7 @@ const CHECKIN_INTERVAL_OPTIONS = Array.from({ length: 24 }, (_, index) => {
   };
 });
 type DbDialect = 'sqlite' | 'mysql' | 'postgres';
+type CheckinScheduleMode = typeof CHECKIN_SCHEDULE_MODE_OPTIONS[number]['value'];
 type RouteCooldownUnit = typeof ROUTE_COOLDOWN_UNIT_OPTIONS[number]['value'];
 type SettingsPillTone = 'neutral' | 'primary' | 'danger' | 'warning';
 type PayloadRulesEditorSectionKey = PayloadRuleAction;
@@ -60,7 +62,7 @@ type PayloadRulesEditorDrafts = Record<PayloadRulesEditorSectionKey, string>;
 
 type RuntimeSettings = {
   checkinCron: string;
-  checkinScheduleMode: 'cron' | 'interval';
+  checkinScheduleMode: CheckinScheduleMode;
   checkinIntervalHours: number;
   balanceRefreshCron: string;
   logCleanupCron: string;
@@ -339,11 +341,15 @@ function toRouteCooldownSeconds(value: number, unit: RouteCooldownUnit): number 
   return normalizedValue * unitConfig.multiplierSec;
 }
 
+function normalizeCheckinScheduleMode(value: unknown): CheckinScheduleMode {
+  return value === 'cron' || value === 'interval' || value === 'random' ? value : 'random';
+}
+
 export default function Settings() {
   const isMobile = useIsMobile();
   const [runtime, setRuntime] = useState<RuntimeSettings>({
     checkinCron: '0 8 * * *',
-    checkinScheduleMode: 'cron',
+    checkinScheduleMode: 'random',
     checkinIntervalHours: 6,
     balanceRefreshCron: '0 * * * *',
     logCleanupCron: '0 6 * * *',
@@ -665,7 +671,7 @@ export default function Settings() {
       const routeCooldownInput = resolveRouteCooldownInput(runtimeInfo.tokenRouterFailureCooldownMaxSec);
       setRuntime({
         checkinCron: runtimeInfo.checkinCron || '0 8 * * *',
-        checkinScheduleMode: runtimeInfo.checkinScheduleMode === 'interval' ? 'interval' : 'cron',
+        checkinScheduleMode: normalizeCheckinScheduleMode(runtimeInfo.checkinScheduleMode),
         checkinIntervalHours: Number(runtimeInfo.checkinIntervalHours) >= 1
           ? Math.min(24, Math.trunc(Number(runtimeInfo.checkinIntervalHours)))
           : 6,
@@ -1347,7 +1353,7 @@ export default function Settings() {
                 value={runtime.checkinScheduleMode}
                 onChange={(value) => setRuntime((prev) => ({
                   ...prev,
-                  checkinScheduleMode: value === 'interval' ? 'interval' : 'cron',
+                  checkinScheduleMode: normalizeCheckinScheduleMode(value),
                 }))}
                 options={CHECKIN_SCHEDULE_MODE_OPTIONS.map((item) => ({ ...item }))}
               />
@@ -1391,6 +1397,9 @@ export default function Settings() {
                 style={{ ...inputStyle, fontFamily: 'var(--font-mono)' }}
               />
             </div>
+          </div>
+          <div style={{ marginTop: 8, fontSize: 12, color: 'var(--color-text-muted)' }}>
+            随机签到会在每天 08:00 至 22:30 之间为每个账号安排一次随机时间；账号签到失败后会自动关闭签到，手动重新开启后从次日恢复自动签到。
           </div>
           <div
             style={{

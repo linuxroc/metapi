@@ -40,6 +40,7 @@ import { invalidateSiteProxyCache, normalizeSiteProxyUrl, withExplicitProxyReque
 import { performFactoryReset } from '../../services/factoryResetService.js';
 import { normalizeLogCleanupRetentionDays } from '../../shared/logCleanupRetentionDays.js';
 import { stopProxyLogRetentionService } from '../../services/proxyLogRetentionService.js';
+import { isCheckinScheduleMode, type CheckinScheduleMode } from '../../shared/checkinSchedule.js';
 import {
   startModelAvailabilityProbeScheduler,
   stopModelAvailabilityProbeScheduler,
@@ -69,7 +70,7 @@ interface RuntimeSettingsBody {
   proxyDebugRetentionHours?: number;
   proxyDebugMaxBodyBytes?: number;
   checkinCron?: string;
-  checkinScheduleMode?: 'cron' | 'interval';
+  checkinScheduleMode?: CheckinScheduleMode;
   checkinIntervalHours?: number;
   balanceRefreshCron?: string;
   logCleanupCron?: string;
@@ -346,8 +347,8 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
       return;
     }
     case 'checkin_schedule_mode': {
-      if (value !== 'cron' && value !== 'interval') return;
-      const nextMode: 'cron' | 'interval' = value;
+      if (!isCheckinScheduleMode(value)) return;
+      const nextMode: CheckinScheduleMode = value;
       config.checkinScheduleMode = nextMode;
       updateCheckinSchedule({
         mode: config.checkinScheduleMode,
@@ -1000,6 +1001,10 @@ export async function settingsRoutes(app: FastifyInstance) {
       || body.checkinScheduleMode !== undefined
       || body.checkinIntervalHours !== undefined;
 
+    let nextCheckinCron = config.checkinCron;
+    let nextCheckinScheduleMode: CheckinScheduleMode = config.checkinScheduleMode;
+    let nextCheckinIntervalHours = config.checkinIntervalHours;
+
     if (body.checkinCron !== undefined) {
       if (!cron.validate(body.checkinCron)) {
         return reply.code(400).send({ success: false, message: '签到 Cron 表达式无效' });
@@ -1007,16 +1012,17 @@ export async function settingsRoutes(app: FastifyInstance) {
       if (body.checkinCron !== config.checkinCron) {
         changedLabels.push(`签到 Cron（${config.checkinCron} -> ${body.checkinCron}）`);
       }
+      nextCheckinCron = body.checkinCron;
     }
 
     if (body.checkinScheduleMode !== undefined) {
-      if (body.checkinScheduleMode !== 'cron' && body.checkinScheduleMode !== 'interval') {
-        return reply.code(400).send({ success: false, message: '签到方式无效：仅支持 cron 或 interval' });
+      if (!isCheckinScheduleMode(body.checkinScheduleMode)) {
+        return reply.code(400).send({ success: false, message: '签到方式无效：仅支持 cron、interval 或 random' });
       }
       if (body.checkinScheduleMode !== config.checkinScheduleMode) {
         changedLabels.push('签到方式');
       }
-      config.checkinScheduleMode = body.checkinScheduleMode;
+      nextCheckinScheduleMode = body.checkinScheduleMode;
     }
 
     if (body.checkinIntervalHours !== undefined) {
@@ -1028,18 +1034,10 @@ export async function settingsRoutes(app: FastifyInstance) {
       if (nextIntervalHours !== config.checkinIntervalHours) {
         changedLabels.push(`签到间隔（${config.checkinIntervalHours}h -> ${nextIntervalHours}h）`);
       }
-      config.checkinIntervalHours = nextIntervalHours;
+      nextCheckinIntervalHours = nextIntervalHours;
     }
 
     if (checkinScheduleTouched) {
-      const nextCheckinCron = body.checkinCron !== undefined ? body.checkinCron : config.checkinCron;
-      const nextCheckinScheduleMode: 'cron' | 'interval' = body.checkinScheduleMode !== undefined
-        ? body.checkinScheduleMode
-        : config.checkinScheduleMode;
-      const nextCheckinIntervalHours = body.checkinIntervalHours !== undefined
-        ? Math.trunc(Number(body.checkinIntervalHours))
-        : config.checkinIntervalHours;
-
       updateCheckinSchedule({
         mode: nextCheckinScheduleMode,
         cronExpr: nextCheckinCron,

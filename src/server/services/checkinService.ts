@@ -18,6 +18,7 @@ import { decryptAccountPassword } from './accountCredentialService.js';
 import { setAccountRuntimeHealth } from './accountHealthService.js';
 import { formatUtcSqlDateTime } from './localTimeService.js';
 import { withAccountProxyOverride } from './siteProxy.js';
+import type { CheckinScheduleMode } from '../shared/checkinSchedule.js';
 
 type CheckinExecutionStatus = 'success' | 'failed' | 'skipped';
 
@@ -120,7 +121,7 @@ async function tryAutoRelogin(account: any, site: any): Promise<string | null> {
   return result.accessToken;
 }
 
-export async function checkinAccount(accountId: number, options?: { skipEvent?: boolean; scheduleMode?: 'cron' | 'interval' }) {
+export async function checkinAccount(accountId: number, options?: { skipEvent?: boolean; scheduleMode?: CheckinScheduleMode }) {
   const rows = await db
     .select()
     .from(schema.accounts)
@@ -280,6 +281,14 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
   }
 
   if (!effectiveSuccess) {
+    await db.update(schema.accounts)
+      .set({
+        checkinEnabled: false,
+        updatedAt: new Date().toISOString(),
+      })
+      .where(eq(schema.accounts.id, account.id))
+      .run();
+
     setAccountRuntimeHealth(account.id, {
       state: 'unhealthy',
       reason: result.message || '\u7b7e\u5230\u5931\u8d25',
@@ -320,7 +329,7 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
   };
 }
 
-export async function checkinAll(options?: { accountIds?: number[]; scheduleMode?: 'cron' | 'interval' }) {
+export async function checkinAll(options?: { accountIds?: number[]; scheduleMode?: CheckinScheduleMode }) {
   const rows = await db
     .select()
     .from(schema.accounts)
