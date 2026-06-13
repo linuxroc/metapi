@@ -77,7 +77,7 @@ function toPositiveInt(value: unknown): number {
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object';
+  return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
 function hasOwn(record: Record<string, unknown>, key: string): boolean {

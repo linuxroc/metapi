@@ -67,6 +67,7 @@ describe('accounts login insert boundary', () => {
 
   afterAll(async () => {
     await app.close();
+    await (await import('../../db/index.js')).closeDbConnections();
     if (dataDir) {
       rmSync(dataDir, { recursive: true, force: true });
     }

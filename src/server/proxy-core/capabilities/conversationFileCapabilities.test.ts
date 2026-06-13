@@ -62,6 +62,16 @@ describe('conversationFileCapabilities', () => {
     });
 
     expect(resolveConversationFileEndpointCapability({
+      sitePlatform: 'gemini',
+      endpoint: 'responses',
+    })).toMatchObject({
+      image: 'unsupported',
+      audio: 'unsupported',
+      document: 'unsupported',
+      preservesRemoteDocumentUrl: false,
+    });
+
+    expect(resolveConversationFileEndpointCapability({
       sitePlatform: 'new-api',
       endpoint: 'messages',
     })).toMatchObject({

@@ -284,7 +284,7 @@ describe('canonical request helpers', () => {
     });
   });
 
-  it('round-trips include continuity metadata back into OpenAI-compatible bodies', () => {
+  it('round-trips include metadata only for Responses-compatible bodies', () => {
     const request = canonicalRequestFromOpenAiBody({
       body: {
         model: 'gpt-5',
@@ -298,16 +298,24 @@ describe('canonical request helpers', () => {
       surface: 'openai-responses',
     });
 
-    const body = canonicalRequestToOpenAiChatBody(request);
+    const chatBody = canonicalRequestToOpenAiChatBody(request);
+    const responsesBody = canonicalRequestToOpenAiChatBody(request, {
+      preserveResponsesExtensions: true,
+    });
 
-    expect(body).toMatchObject({
+    expect(chatBody).toMatchObject({
+      model: 'gpt-5',
+      reasoning_effort: 'high',
+    });
+    expect(chatBody.include).toBeUndefined();
+    expect(responsesBody).toMatchObject({
       model: 'gpt-5',
       reasoning_effort: 'high',
       include: ['reasoning.encrypted_content', 'message.input_image.image_url'],
     });
   });
 
-  it('preserves extra fields on tool-shaped raw tool_choice objects', () => {
+  it('drops Responses-only raw tool choices from Chat-compatible bodies', () => {
     const request = canonicalRequestFromOpenAiBody({
       body: {
         model: 'gpt-5',
@@ -317,6 +325,10 @@ describe('canonical request helpers', () => {
           mode: 'required',
           disable_parallel_tool_use: true,
         },
+        tools: [{
+          type: 'custom',
+          name: 'browser',
+        }],
         messages: [{ role: 'user', content: 'hello' }],
       },
       surface: 'openai-responses',
@@ -324,12 +336,7 @@ describe('canonical request helpers', () => {
 
     const body = canonicalRequestToOpenAiChatBody(request);
 
-    expect(body.tool_choice).toEqual({
-      type: 'tool',
-      name: 'browser',
-      mode: 'required',
-      disable_parallel_tool_use: true,
-    });
+    expect(body.tool_choice).toBeUndefined();
   });
 
   it('preserves structured tool outputs and top-level attachments through canonical round-trips', () => {
@@ -369,7 +376,7 @@ describe('canonical request helpers', () => {
     }]);
   });
 
-  it('preserves richer Responses tools, raw tool_choice, assistant phase, and reasoning signatures through canonical round-trips', () => {
+  it('preserves richer Responses extensions through canonical Responses round-trips', () => {
     const request = canonicalRequestFromOpenAiBody({
       body: {
         model: 'gpt-5',
@@ -407,7 +414,9 @@ describe('canonical request helpers', () => {
       surface: 'openai-responses',
     });
 
-    const body = canonicalRequestToOpenAiChatBody(request);
+    const body = canonicalRequestToOpenAiChatBody(request, {
+      preserveResponsesExtensions: true,
+    });
 
     expect(body.parallel_tool_calls).toBe(false);
     expect(body.tools).toEqual([
@@ -441,6 +450,112 @@ describe('canonical request helpers', () => {
     ]);
   });
 
+  it('keeps generation settings and tool thought signatures in canonical Chat conversions', () => {
+    const request = canonicalRequestFromOpenAiBody({
+      body: {
+        model: 'gpt-5',
+        max_completion_tokens: 512,
+        temperature: 0.3,
+        top_p: 0.8,
+        top_k: 20,
+        stop: ['END'],
+        response_format: { type: 'json_object' },
+        parallel_tool_calls: false,
+        messages: [{
+          role: 'assistant',
+          content: '',
+          tool_calls: [{
+            id: 'call_1',
+            type: 'function',
+            function: {
+              name: 'lookup',
+              arguments: '{"topic":"weather"}',
+            },
+            provider_specific_fields: {
+              thought_signature: 'sig_tool_1',
+            },
+          }],
+        }],
+      },
+      surface: 'openai-chat',
+    });
+
+    expect(request).toMatchObject({
+      generation: {
+        maxOutputTokens: 512,
+        temperature: 0.3,
+        topP: 0.8,
+        topK: 20,
+        stopSequences: ['END'],
+        responseFormat: { type: 'json_object' },
+      },
+      parallelToolCalls: false,
+      messages: [{
+        parts: [{
+          type: 'tool_call',
+          thoughtSignature: 'sig_tool_1',
+        }],
+      }],
+    });
+
+    expect(canonicalRequestToOpenAiChatBody(request)).toMatchObject({
+      max_completion_tokens: 512,
+      temperature: 0.3,
+      top_p: 0.8,
+      top_k: 20,
+      stop: ['END'],
+      response_format: { type: 'json_object' },
+      parallel_tool_calls: false,
+      messages: [{
+        tool_calls: [{
+          provider_specific_fields: {
+            thought_signature: 'sig_tool_1',
+          },
+        }],
+      }],
+    });
+  });
+
+  it('preserves standard OpenAI input_audio blocks through canonical Chat conversion', () => {
+    const request = canonicalRequestFromOpenAiBody({
+      body: {
+        model: 'gpt-audio',
+        messages: [{
+          role: 'user',
+          content: [{
+            type: 'input_audio',
+            input_audio: {
+              data: 'UklGRg==',
+              format: 'wav',
+            },
+          }],
+        }],
+      },
+      surface: 'openai-chat',
+    });
+
+    expect(request.messages).toEqual([{
+      role: 'user',
+      parts: [{
+        type: 'audio',
+        data: 'UklGRg==',
+        format: 'wav',
+        mimeType: 'audio/wav',
+      }],
+    }]);
+    expect(canonicalRequestToOpenAiChatBody(request)).toMatchObject({
+      messages: [{
+        content: [{
+          type: 'input_audio',
+          input_audio: {
+            data: 'UklGRg==',
+            format: 'wav',
+          },
+        }],
+      }],
+    });
+  });
+
   it('writes raw canonical tool types back into OpenAI-compatible bodies when the raw payload omits the discriminator', () => {
     const request = createCanonicalRequestEnvelope({
       requestedModel: 'gpt-5',
@@ -459,9 +574,11 @@ describe('canonical request helpers', () => {
 
     expect(body.tools).toEqual([{
       type: 'custom',
-      name: 'browser',
-      description: 'browse the web',
-      format: { type: 'text' },
+      custom: {
+        name: 'browser',
+        description: 'browse the web',
+        format: { type: 'text' },
+      },
     }]);
   });
 });

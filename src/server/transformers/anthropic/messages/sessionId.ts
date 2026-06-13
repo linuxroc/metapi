@@ -1,3 +1,5 @@
+import { normalizeSessionIdentifier } from '../../../contracts/sessionIdentifier.js';
+
 /**
  * Protocol-pure helper for extracting the Anthropic Messages protocol-level
  * continuation identifier from an already parsed downstream request body.
@@ -74,13 +76,9 @@ export function extractAnthropicMessagesSessionId(parsedBody: unknown): string |
       const blockRecord = block as { type?: unknown; tool_use_id?: unknown };
       if (blockRecord.type !== 'tool_result') continue;
 
-      const rawId = blockRecord.tool_use_id;
-      if (typeof rawId !== 'string') continue;
-
-      const trimmed = rawId.trim();
-      if (trimmed.length === 0) continue;
-
-      lastFound = trimmed;
+      const normalizedId = normalizeSessionIdentifier(blockRecord.tool_use_id);
+      if (!normalizedId) continue;
+      lastFound = normalizedId;
     }
   }
 
@@ -174,13 +172,9 @@ export function extractAnthropicMessagesContinuationIdsFromResponse(
       const blockRecord = block as { type?: unknown; id?: unknown };
       if (blockRecord.type !== 'tool_use') continue;
 
-      const rawId = blockRecord.id;
-      if (typeof rawId !== 'string') continue;
-
-      const trimmed = rawId.trim();
-      if (trimmed.length === 0) continue;
-
-      found.push(trimmed);
+      const normalizedId = normalizeSessionIdentifier(blockRecord.id);
+      if (!normalizedId) continue;
+      found.push(normalizedId);
     }
     return found;
   }
@@ -199,13 +193,11 @@ export function extractAnthropicMessagesContinuationIdsFromResponse(
         continue;
       }
 
-      const rawId = (toolCall as { id?: unknown }).id;
-      if (typeof rawId !== 'string') continue;
-
-      const trimmed = rawId.trim();
-      if (trimmed.length === 0) continue;
-
-      found.push(trimmed);
+      const normalizedId = normalizeSessionIdentifier(
+        (toolCall as { id?: unknown }).id,
+      );
+      if (!normalizedId) continue;
+      found.push(normalizedId);
     }
   }
 

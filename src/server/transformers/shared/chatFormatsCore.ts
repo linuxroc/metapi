@@ -1,5 +1,7 @@
 import {
   decodeAnthropicReasoningSignature,
+  encodeAnthropicReasoningSignature,
+  encodeGeminiThoughtSignature,
 } from './reasoningTransport.js';
 import { toOpenAiChatFileBlock } from './inputFile.js';
 import {
@@ -22,10 +24,17 @@ export type StreamTransformContext = {
   created: number;
   roleSent: boolean;
   doneSent: boolean;
-  toolCalls: Record<number, { id?: string; name?: string; arguments?: string }>;
+  toolCalls: Record<number, {
+    id?: string;
+    name?: string;
+    arguments?: string;
+    thoughtSignature?: string;
+  }>;
   responsesToolCallIndexByOutputIndex: Record<number, number>;
   responsesToolCallIndexById: Record<string, number>;
   nextResponsesToolCallIndex: number;
+  geminiToolCallIndexById: Record<string, number>;
+  nextGeminiToolCallIndex: number;
   responsesTextByIndex: Record<number, string>;
   responsesReasoningByIndex: Record<number, string>;
   thinkTagParser: ThinkTagParserState;
@@ -56,6 +65,7 @@ export type NormalizedStreamEvent = {
     id?: string;
     name?: string;
     argumentsDelta?: string;
+    thoughtSignature?: string;
   }>;
   finishReason?: string | null;
   done?: boolean;
@@ -74,6 +84,7 @@ export type NormalizedFinalResponse = {
     id: string;
     name: string;
     arguments: string;
+    thoughtSignature?: string;
   }>;
 };
 
@@ -85,7 +96,7 @@ export type ParsedDownstreamChatRequest = {
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object';
+  return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -230,44 +241,90 @@ export function normalizeStopReason(raw: unknown): string | null {
   const value = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
   if (!value) return null;
 
-  if (value === 'failed' || value === 'error') {
+  const errorReasons = new Set([
+    'failed',
+    'error',
+    'finish_reason_unspecified',
+    'malformed_function_call',
+    'unexpected_tool_call',
+    'too_many_tool_calls',
+    'no_image',
+    'image_other',
+    'language',
+    'other',
+  ]);
+  if (errorReasons.has(value)) {
     return 'error';
   }
 
-  if (
-    value === 'end_turn'
-    || value === 'stop'
-    || value === 'end'
-    || value === 'eos'
-    || value === 'finished'
-    || value === 'completed'
-    || value === 'stop_sequence'
-  ) {
+  const stopReasons = new Set([
+    'end_turn',
+    'stop',
+    'end',
+    'eos',
+    'finished',
+    'completed',
+    'stop_sequence',
+    'pause_turn',
+  ]);
+  if (stopReasons.has(value)) {
     return 'stop';
   }
 
-  if (
-    value === 'incomplete'
-    || value === 'max_tokens'
-    || value === 'length'
-    || value === 'max_output_tokens'
-    || value === 'max_tokens_exceeded'
-    || value.includes('max')
-  ) {
+  const lengthReasons = new Set([
+    'incomplete',
+    'max_tokens',
+    'length',
+    'max_output_tokens',
+    'max_tokens_exceeded',
+    'model_context_window_exceeded',
+  ]);
+  if (lengthReasons.has(value)) {
     return 'length';
   }
 
-  if (value === 'tool_use' || value === 'tool_calls' || value.includes('tool')) {
+  if (value === 'tool_use' || value === 'tool_calls' || value === 'function_call') {
     return 'tool_calls';
   }
 
+  const contentFilterReasons = new Set([
+    'content_filter',
+    'refusal',
+    'safety',
+    'max_safety_risk',
+    'recitation',
+    'blocklist',
+    'prohibited_content',
+    'spii',
+    'image_safety',
+    'image_prohibited_content',
+  ]);
+  if (contentFilterReasons.has(value)) {
+    return 'content_filter';
+  }
+
   return null;
+}
+
+export function isExplicitErrorStopReason(raw: unknown): boolean {
+  if (normalizeStopReason(raw) === 'error') return true;
+  const value = typeof raw === 'string'
+    ? raw.trim().toLowerCase().replace(/[\s-]+/g, '_')
+    : '';
+  return value === 'tool_error';
+}
+
+function normalizeTerminalStopReason(raw: unknown, fallback: string | null): string | null {
+  const normalized = normalizeStopReason(raw);
+  if (normalized) return normalized;
+  return isExplicitErrorStopReason(raw) ? 'error' : fallback;
 }
 
 export function toClaudeStopReason(finishReason: string | null | undefined): string {
   const value = normalizeStopReason(finishReason);
   if (value === 'length') return 'max_tokens';
   if (value === 'tool_calls') return 'tool_use';
+  if (value === 'content_filter') return 'refusal';
   return 'end_turn';
 }
 
@@ -282,6 +339,8 @@ export function createStreamTransformContext(modelName: string): StreamTransform
     responsesToolCallIndexByOutputIndex: {},
     responsesToolCallIndexById: {},
     nextResponsesToolCallIndex: 0,
+    geminiToolCallIndexById: {},
+    nextGeminiToolCallIndex: 0,
     responsesTextByIndex: {},
     responsesReasoningByIndex: {},
     thinkTagParser: createThinkTagParserState(),
@@ -481,9 +540,9 @@ function parseResponsesReasoning(payload: Record<string, unknown>): {
     const text = joinNonEmpty([parsed.content, parsed.reasoning]);
     if (text) reasoningParts.push(text);
 
-    const encrypted = asTrimmedString(item.encrypted_content);
-    if (!reasoningSignature && encrypted) {
-      reasoningSignature = encrypted;
+    const signature = asTrimmedString(item.reasoning_signature ?? item.encrypted_content);
+    if (!reasoningSignature && signature) {
+      reasoningSignature = signature;
     }
   }
 
@@ -511,7 +570,7 @@ function responsesStatusToChatFinishReason(
     return reason === 'max_output_tokens' ? 'length' : 'stop';
   }
   if (normalizedStatus === 'failed') {
-    return 'stop';
+    return 'error';
   }
   return hasToolCalls ? 'tool_calls' : 'stop';
 }
@@ -552,6 +611,37 @@ function stringifyUnknownValue(value: unknown): string {
     }
   }
   return '';
+}
+
+function collectToolCallsFromGeminiContent(
+  content: unknown,
+): Array<{ id?: string; name: string; arguments: string; thoughtSignature?: string }> {
+  const parts = isRecord(content) && Array.isArray(content.parts)
+    ? content.parts
+    : (Array.isArray(content) ? content : []);
+  const toolCalls: Array<{
+    id?: string;
+    name: string;
+    arguments: string;
+    thoughtSignature?: string;
+  }> = [];
+
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index];
+    if (!isRecord(part) || !isRecord(part.functionCall)) continue;
+    const functionCall = part.functionCall;
+    const id = asTrimmedString(functionCall.id);
+    const name = asTrimmedString(functionCall.name) || `tool_${index}`;
+    const thoughtSignature = asTrimmedString(part.thoughtSignature);
+    toolCalls.push({
+      ...(id ? { id } : {}),
+      name,
+      arguments: stringifyUnknownValue(functionCall.args) || '{}',
+      ...(thoughtSignature ? { thoughtSignature } : {}),
+    });
+  }
+
+  return toolCalls;
 }
 
 function parseJsonLike(value: string): unknown {
@@ -624,6 +714,36 @@ function collectToolCallsFromClaudeContent(content: unknown): Array<{ id: string
   }
 
   return toolCalls;
+}
+
+function extractAnthropicReasoningSignature(content: unknown): string | undefined {
+  if (!Array.isArray(content)) return undefined;
+
+  for (let index = content.length - 1; index >= 0; index -= 1) {
+    const block = content[index];
+    if (!isRecord(block) || block.type !== 'thinking') continue;
+    const encoded = encodeAnthropicReasoningSignature(asTrimmedString(block.signature));
+    if (encoded) return encoded;
+  }
+
+  return undefined;
+}
+
+function extractGeminiReasoningSignature(content: unknown): string | undefined {
+  const parts = isRecord(content) && Array.isArray(content.parts)
+    ? content.parts
+    : (Array.isArray(content) ? content : []);
+
+  for (let index = parts.length - 1; index >= 0; index -= 1) {
+    const part = parts[index];
+    if (!isRecord(part) || part.thought !== true) continue;
+    const rawSignature = asTrimmedString(part.thoughtSignature);
+    if (!rawSignature) continue;
+    if (rawSignature.startsWith('metapi:')) return rawSignature;
+    return encodeGeminiThoughtSignature(rawSignature) ?? undefined;
+  }
+
+  return undefined;
 }
 
 function collectToolCallsFromResponsesPayload(payload: Record<string, unknown>): Array<{ id: string; name: string; arguments: string }> {
@@ -1256,8 +1376,6 @@ export function convertClaudeRequestToOpenAiBody(body: Record<string, unknown>):
   const maxTokens = pickFiniteNumber(body.max_tokens);
   if (maxTokens !== undefined) {
     payload.max_tokens = maxTokens;
-  } else {
-    payload.max_tokens = 4096;
   }
 
   if (Array.isArray(body.stop_sequences) && body.stop_sequences.length > 0) {
@@ -1270,6 +1388,9 @@ export function convertClaudeRequestToOpenAiBody(body: Record<string, unknown>):
 
   if (body.tools !== undefined) payload.tools = convertClaudeToolsToOpenAiChat(body.tools);
   if (body.tool_choice !== undefined) payload.tool_choice = convertClaudeToolChoiceToOpenAiChat(body.tool_choice);
+  if (isRecord(body.tool_choice) && body.tool_choice.disable_parallel_tool_use === true) {
+    payload.parallel_tool_calls = false;
+  }
 
   const promptCacheKey = asTrimmedString(body.prompt_cache_key);
   if (promptCacheKey) payload.prompt_cache_key = promptCacheKey;
@@ -1368,28 +1489,43 @@ export function normalizeUpstreamFinalResponse(
     const content = extractAssistantContent(choice) || extractAssistantContent(payload);
     const reasoning = extractAssistantReasoning(choice) || extractAssistantReasoning(payload);
     const toolCalls = collectToolCallsFromOpenAiChoice(choice);
+    const choiceMessage = isRecord(choice?.message) ? choice.message : {};
+    const reasoningSignature = asTrimmedString(
+      choiceMessage.reasoning_signature
+      ?? choice?.reasoning_signature
+      ?? payload.reasoning_signature,
+    );
     return {
       id: isNonEmptyString(payload.id) ? payload.id : fallbackId,
       model: isNonEmptyString(payload.model) ? payload.model : fallbackModel,
       created: ensureIntegerTimestamp(payload.created, now),
       content: content || (toolCalls.length > 0 ? '' : fallbackText),
       reasoningContent: reasoning,
+      ...(reasoningSignature ? { reasoningSignature } : {}),
       finishReason: toolCalls.length > 0
         ? 'tool_calls'
-        : (normalizeStopReason(choice?.finish_reason ?? payload.stop_reason) || 'stop'),
+        : (normalizeTerminalStopReason(choice?.finish_reason ?? payload.stop_reason, 'stop') || 'stop'),
       toolCalls,
     };
   }
 
   if (isRecord(payload) && typeof payload.type === 'string' && payload.type === 'message') {
     const toolCalls = collectToolCallsFromClaudeContent(payload.content);
+    const reasoningSignature = (
+      extractAnthropicReasoningSignature(payload.content)
+      ?? encodeAnthropicReasoningSignature(asTrimmedString(payload.reasoning_signature))
+      ?? undefined
+    );
     return {
       id: isNonEmptyString(payload.id) ? payload.id : fallbackId,
       model: isNonEmptyString(payload.model) ? payload.model : fallbackModel,
       created: now,
       content: parseClaudeMessageContent(payload.content) || (toolCalls.length > 0 ? '' : fallbackText),
       reasoningContent: extractTextAndReasoning(payload.content).reasoning,
-      finishReason: toolCalls.length > 0 ? 'tool_calls' : (normalizeStopReason(payload.stop_reason) || 'stop'),
+      ...(reasoningSignature ? { reasoningSignature } : {}),
+      finishReason: toolCalls.length > 0
+        ? 'tool_calls'
+        : (normalizeTerminalStopReason(payload.stop_reason, 'stop') || 'stop'),
       toolCalls,
     };
   }
@@ -1416,16 +1552,24 @@ export function normalizeUpstreamFinalResponse(
   if (isRecord(payload) && Array.isArray(payload.candidates)) {
     const candidate = payload.candidates[0] || {};
     const parsedCandidate = extractTextAndReasoning(candidate?.content?.parts || candidate?.content);
+    const toolCalls = collectToolCallsFromGeminiContent(candidate?.content);
+    const reasoningSignature = extractGeminiReasoningSignature(candidate?.content);
     return {
       id: isNonEmptyString((payload as any).responseId) ? (payload as any).responseId : fallbackId,
       model: isNonEmptyString((payload as any).modelVersion)
         ? (payload as any).modelVersion
         : fallbackModel,
       created: now,
-      content: parsedCandidate.content || fallbackText,
+      content: parsedCandidate.content || (toolCalls.length > 0 ? '' : fallbackText),
       reasoningContent: parsedCandidate.reasoning,
-      finishReason: normalizeStopReason(candidate?.finishReason || (payload as any).finishReason) || 'stop',
-      toolCalls: [],
+      ...(reasoningSignature ? { reasoningSignature } : {}),
+      finishReason: toolCalls.length > 0
+        ? 'tool_calls'
+        : (normalizeTerminalStopReason(candidate?.finishReason || (payload as any).finishReason, 'stop') || 'stop'),
+      toolCalls: toolCalls.map((toolCall, index) => ({
+        ...toolCall,
+        id: toolCall.id || `call_${index}`,
+      })),
     };
   }
 
@@ -1530,7 +1674,7 @@ export function normalizeUpstreamStreamEvent(
       reasoningDelta: reasoningDelta || undefined,
       reasoningSignature,
       toolCallDeltas: toolCallDeltas.length > 0 ? toolCallDeltas : undefined,
-      finishReason: normalizeStopReason(choice?.finish_reason),
+      finishReason: normalizeTerminalStopReason(choice?.finish_reason, null),
     };
   }
 
@@ -1607,14 +1751,15 @@ export function normalizeUpstreamStreamEvent(
   if ((type === 'response.output_item.added' || type === 'response.output_item.done') && isRecord((payload as any).item)) {
     const outputIndex = extractResponsesOutputIndex(payload as Record<string, unknown>);
     const item = (payload as any).item as Record<string, unknown>;
-    if (item.type === 'reasoning' && isNonEmptyString(item.encrypted_content)) {
+    const reasoningSignature = asTrimmedString(item.reasoning_signature ?? item.encrypted_content);
+    if (item.type === 'reasoning' && reasoningSignature) {
       const reasoningText = extractResponsesItemText(item);
       const novelReasoning = computeNovelResponsesDelta(context.responsesReasoningByIndex[outputIndex] || '', reasoningText);
       if (reasoningText) {
         context.responsesReasoningByIndex[outputIndex] = reasoningText;
       }
       return {
-        reasoningSignature: item.encrypted_content,
+        reasoningSignature,
         reasoningDelta: novelReasoning || undefined,
       };
     }
@@ -1864,6 +2009,11 @@ export function normalizeUpstreamStreamEvent(
       };
     }
 
+    if (deltaType === 'signature_delta') {
+      const reasoningSignature = encodeAnthropicReasoningSignature(asTrimmedString(delta.signature));
+      return reasoningSignature ? { reasoningSignature } : {};
+    }
+
     return {
       contentDelta: parsed.content || undefined,
       reasoningDelta: parsed.reasoning || undefined,
@@ -1873,7 +2023,7 @@ export function normalizeUpstreamStreamEvent(
   if (type === 'message_delta') {
     const delta = isRecord(payload.delta) ? payload.delta : {};
     return {
-      finishReason: normalizeStopReason(delta.stop_reason ?? payload.stop_reason),
+      finishReason: normalizeTerminalStopReason(delta.stop_reason ?? payload.stop_reason, null),
     };
   }
 
@@ -1894,10 +2044,83 @@ export function normalizeUpstreamStreamEvent(
       context.model = fallbackModel;
     }
 
+    if (isNonEmptyString((payload as any).responseId)) {
+      context.id = (payload as any).responseId;
+    }
+
+    const toolCalls = collectToolCallsFromGeminiContent((candidate as any).content);
+    const reasoningSignature = extractGeminiReasoningSignature((candidate as any).content);
+    const toolCallDeltas = toolCalls
+      .map((toolCall, localIndex) => {
+        let index: number;
+        if (toolCall.id) {
+          const knownIndex = context.geminiToolCallIndexById[toolCall.id];
+          if (knownIndex !== undefined) {
+            index = knownIndex;
+          } else {
+            index = context.nextGeminiToolCallIndex;
+            context.nextGeminiToolCallIndex += 1;
+            context.geminiToolCallIndexById[toolCall.id] = index;
+          }
+        } else {
+          const localKnownTool = context.toolCalls[localIndex];
+          const canReuseLocalIndex = (
+            !!localKnownTool
+            && localKnownTool.name === toolCall.name
+            && (
+              localKnownTool.arguments === toolCall.arguments
+              || toolCall.arguments.startsWith(localKnownTool.arguments || '')
+            )
+          );
+          if (canReuseLocalIndex) {
+            index = localIndex;
+          } else {
+            index = context.nextGeminiToolCallIndex;
+            context.nextGeminiToolCallIndex += 1;
+          }
+        }
+        context.nextGeminiToolCallIndex = Math.max(context.nextGeminiToolCallIndex, index + 1);
+        const knownTool = context.toolCalls[index] || {};
+        const argumentsDelta = computeNovelResponsesDelta(
+          knownTool.arguments || '',
+          toolCall.arguments,
+        );
+        const shouldBackfillId = !knownTool.id;
+        const shouldBackfillName = !knownTool.name;
+        const shouldBackfillThoughtSignature = (
+          !!toolCall.thoughtSignature
+          && !knownTool.thoughtSignature
+        );
+        if (
+          !argumentsDelta
+          && !shouldBackfillId
+          && !shouldBackfillName
+          && !shouldBackfillThoughtSignature
+        ) {
+          return null;
+        }
+        return {
+          index,
+          ...(shouldBackfillId ? { id: toolCall.id || `call_${index}` } : {}),
+          ...(shouldBackfillName ? { name: toolCall.name } : {}),
+          ...(argumentsDelta ? { argumentsDelta } : {}),
+          ...(shouldBackfillThoughtSignature
+            ? { thoughtSignature: toolCall.thoughtSignature }
+            : {}),
+        };
+      })
+      .filter((item): item is NonNullable<typeof item> => !!item);
+
+    const rawFinishReason = (candidate as any).finishReason ?? (payload as any).finishReason;
+    const normalizedFinishReason = normalizeTerminalStopReason(rawFinishReason, null);
     return {
       contentDelta: parsed.content || undefined,
       reasoningDelta: parsed.reasoning || undefined,
-      finishReason: normalizeStopReason((candidate as any).finishReason || (payload as any).finishReason),
+      ...(reasoningSignature ? { reasoningSignature } : {}),
+      ...(toolCallDeltas.length > 0 ? { toolCallDeltas } : {}),
+      finishReason: normalizedFinishReason && toolCalls.length > 0
+        ? 'tool_calls'
+        : normalizedFinishReason,
     };
   }
 
@@ -1914,15 +2137,22 @@ function buildOpenAiStreamChunk(
 ): Record<string, unknown> | null {
   const normalizedContentDelta = event.contentDelta || '';
   const normalizedReasoningDelta = event.reasoningDelta || '';
+  const normalizedReasoningSignature = asTrimmedString(event.reasoningSignature);
   const delta: Record<string, unknown> = {};
   const isInitialAssistantRoleOnlyEvent = (
     !context.roleSent
     && event.role === 'assistant'
     && !normalizedContentDelta
     && !normalizedReasoningDelta
+    && !normalizedReasoningSignature
   );
 
-  if (!context.roleSent && (event.role === 'assistant' || normalizedContentDelta || normalizedReasoningDelta)) {
+  if (!context.roleSent && (
+    event.role === 'assistant'
+    || normalizedContentDelta
+    || normalizedReasoningDelta
+    || normalizedReasoningSignature
+  )) {
     delta.role = 'assistant';
     context.roleSent = true;
   } else if (event.role === 'assistant') {
@@ -1938,6 +2168,10 @@ function buildOpenAiStreamChunk(
     delta.reasoning_content = normalizedReasoningDelta;
   }
 
+  if (normalizedReasoningSignature) {
+    delta.reasoning_signature = normalizedReasoningSignature;
+  }
+
   if (Array.isArray(event.toolCallDeltas) && event.toolCallDeltas.length > 0) {
     const toolCalls = event.toolCallDeltas.map((toolDelta) => {
       const index = Number.isFinite(toolDelta.index) ? Math.max(0, Math.trunc(toolDelta.index)) : 0;
@@ -1945,11 +2179,13 @@ function buildOpenAiStreamChunk(
       const id = toolDelta.id || existing.id;
       const name = toolDelta.name || existing.name || '';
       const nextArguments = `${existing.arguments || ''}${toolDelta.argumentsDelta ?? ''}`;
+      const thoughtSignature = toolDelta.thoughtSignature || existing.thoughtSignature;
       // Keep synthetic call_meta_* ids as serialization-only fallbacks so later real ids can still backfill.
       context.toolCalls[index] = {
         ...(id ? { id } : {}),
         ...(name || existing.name ? { name: name || existing.name } : {}),
         arguments: nextArguments,
+        ...(thoughtSignature ? { thoughtSignature } : {}),
       };
 
       const fn: Record<string, unknown> = {};
@@ -1961,6 +2197,11 @@ function buildOpenAiStreamChunk(
       if (toolDelta.id) serializedToolCall.id = toolDelta.id;
       if (toolDelta.id || toolDelta.name) serializedToolCall.type = 'function';
       if (Object.keys(fn).length > 0) serializedToolCall.function = fn;
+      if (toolDelta.thoughtSignature) {
+        serializedToolCall.provider_specific_fields = {
+          thought_signature: toolDelta.thoughtSignature,
+        };
+      }
       return serializedToolCall;
     });
 
@@ -2229,7 +2470,12 @@ export function serializeStreamDone(
 }
 
 function toOpenAiToolCalls(
-  toolCalls: Array<{ id: string; name: string; arguments: string }>,
+  toolCalls: Array<{
+    id: string;
+    name: string;
+    arguments: string;
+    thoughtSignature?: string;
+  }>,
 ): Array<Record<string, unknown>> {
   return toolCalls.map((toolCall, index) => ({
     index,
@@ -2239,6 +2485,13 @@ function toOpenAiToolCalls(
       name: toolCall.name || '',
       arguments: toolCall.arguments || '',
     },
+    ...(toolCall.thoughtSignature
+      ? {
+        provider_specific_fields: {
+          thought_signature: toolCall.thoughtSignature,
+        },
+      }
+      : {}),
   }));
 }
 

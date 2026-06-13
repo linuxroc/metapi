@@ -60,7 +60,7 @@ describe('upstreamEndpointDerivation', () => {
     expect(order).toEqual(['responses', 'chat', 'messages']);
   });
 
-  it('keeps explicit openai platforms on responses-first ordering even for claude-family models', async () => {
+  it('keeps generic openai-compatible chat requests on chat before cross-protocol fallbacks', async () => {
     const order = await resolveUpstreamEndpointCandidates(
       {
         ...baseContext,
@@ -73,10 +73,10 @@ describe('upstreamEndpointDerivation', () => {
       'openai',
     );
 
-    expect(order).toEqual(['responses', 'chat', 'messages']);
+    expect(order).toEqual(['chat', 'responses']);
   });
 
-  it('keeps antigravity non-gemini compatibility requests on messages-first ordering', async () => {
+  it('declares antigravity compatibility requests as Gemini-internal chat normalization', async () => {
     const order = await resolveUpstreamEndpointCandidates(
       {
         ...baseContext,
@@ -93,7 +93,97 @@ describe('upstreamEndpointDerivation', () => {
       },
     );
 
-    expect(order).toEqual(['messages']);
+    expect(order).toEqual(['chat']);
+  });
+
+  it('keeps inline document requests on the Gemini chat endpoint', async () => {
+    const order = await resolveUpstreamEndpointCandidates(
+      {
+        ...baseContext,
+        site: {
+          ...baseContext.site,
+          platform: 'gemini',
+          url: 'https://generativelanguage.googleapis.com',
+        },
+      },
+      'gemini-2.5-pro',
+      'responses',
+      undefined,
+      {
+        hasNonImageFileInput: true,
+        conversationFileSummary: {
+          hasImage: false,
+          hasAudio: false,
+          hasDocument: true,
+          hasRemoteDocumentUrl: false,
+        },
+      },
+    );
+
+    expect(order).toEqual(['chat']);
+  });
+
+  it('ignores ambiguous catalog labels instead of misclassifying endpoint support', async () => {
+    fetchModelPricingCatalogMock.mockResolvedValue({
+      models: [{
+        modelName: 'gpt-5.3',
+        supportedEndpointTypes: [
+          'chatty-relay',
+          'openai-response-cache',
+          'response-auditing',
+        ],
+      }],
+      groupRatio: {},
+    });
+
+    const order = await resolveUpstreamEndpointCandidates(
+      baseContext,
+      'gpt-5.3',
+      'openai',
+    );
+
+    expect(order).toEqual(['chat', 'messages', 'responses']);
+  });
+
+  it('recognizes exact endpoint paths and URLs from catalog metadata', async () => {
+    fetchModelPricingCatalogMock.mockResolvedValue({
+      models: [{
+        modelName: 'gpt-5.3',
+        supportedEndpointTypes: ['https://gateway.example.com/v1/responses?beta=true'],
+      }],
+      groupRatio: {},
+    });
+
+    const order = await resolveUpstreamEndpointCandidates(
+      baseContext,
+      'gpt-5.3',
+      'openai',
+    );
+
+    expect(order).toEqual(['responses']);
+  });
+
+  it('rejects compact requests on native platforms without a responses endpoint', async () => {
+    for (const platform of ['claude', 'gemini', 'gemini-cli', 'antigravity']) {
+      const order = await resolveUpstreamEndpointCandidates(
+        {
+          ...baseContext,
+          site: {
+            ...baseContext.site,
+            platform,
+          },
+        },
+        'gpt-5.3',
+        'responses',
+        undefined,
+        undefined,
+        {
+          requestKind: 'responses-compact',
+        },
+      );
+
+      expect(order, platform).toEqual([]);
+    }
   });
 
   it('keeps claude-family file-url requests messages-first for claude upstreams', async () => {
@@ -117,6 +207,37 @@ describe('upstreamEndpointDerivation', () => {
     );
 
     expect(order).toEqual(['messages']);
+  });
+
+  it('rejects native responses file URLs on Gemini chat-only transports', async () => {
+    for (const platform of ['gemini', 'gemini-cli', 'antigravity']) {
+      const order = await resolveUpstreamEndpointCandidates(
+        {
+          ...baseContext,
+          site: {
+            ...baseContext.site,
+            platform,
+          },
+        },
+        'gemini-2.5-pro',
+        'responses',
+        undefined,
+        {
+          hasNonImageFileInput: true,
+          conversationFileSummary: {
+            hasImage: false,
+            hasAudio: false,
+            hasDocument: true,
+            hasRemoteDocumentUrl: true,
+          },
+        },
+        {
+          requiresNativeResponsesFileUrl: true,
+        },
+      );
+
+      expect(order, platform).toEqual([]);
+    }
   });
 
   it('derives claude count_tokens requests as messages-only when the upstream supports messages', async () => {

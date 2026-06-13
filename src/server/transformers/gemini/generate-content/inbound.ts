@@ -71,6 +71,7 @@ function cloneGenerationConfig(value: unknown): GeminiRecord | undefined {
     'responseModalities',
     'responseMimeType',
     'responseSchema',
+    'responseJsonSchema',
     'candidateCount',
     'maxOutputTokens',
     'temperature',

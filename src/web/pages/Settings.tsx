@@ -2645,6 +2645,7 @@ export default function Settings() {
             </button>
             <button
               onClick={() => {
+                void api.logout().catch(() => {});
                 clearAuthSession(localStorage);
                 window.location.reload();
               }}

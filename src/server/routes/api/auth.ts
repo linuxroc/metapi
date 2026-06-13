@@ -6,6 +6,16 @@ import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
 import { createRateLimitGuard } from '../../middleware/requestRateLimit.js';
 import { parseAuthChangePayload } from '../../contracts/supportRoutePayloads.js';
 import { extractClientIp, isIpAllowed } from '../../middleware/auth.js';
+import {
+  ADMIN_SESSION_COOKIE,
+  buildAdminSessionCookie,
+  buildExpiredAdminSessionCookie,
+  createAdminSession,
+  parseCookieValue,
+  revokeAdminSession,
+  revokeAllAdminSessions,
+} from '../../services/adminSessionService.js';
+import { secureTokenEqual } from '../../services/secureTokenCompare.js';
 
 const limitAdminTokenChange = createRateLimitGuard({
   bucket: 'auth-change',
@@ -117,7 +127,7 @@ export async function authRoutes(app: FastifyInstance) {
     '/api/auth/login',
     { preHandler: [limitLoginAttempt] },
     async (request, reply) => {
-      const clientIp = extractClientIp(request.ip, request.headers['x-forwarded-for']);
+      const clientIp = extractClientIp(request.ip);
       if (!isIpAllowed(clientIp, config.adminIpAllowlist)) {
         return reply.code(403).send({ success: false, error: 'ip_not_allowed' });
       }
@@ -141,11 +151,20 @@ export async function authRoutes(app: FastifyInstance) {
         }
       }
 
-      if (submittedToken !== config.authToken) {
+      if (!secureTokenEqual(submittedToken, config.authToken)) {
         return reply.code(401).send({ success: false, error: 'invalid_admin_token' });
       }
 
-      return { success: true };
+      const session = createAdminSession();
+      reply.header(
+        'set-cookie',
+        buildAdminSessionCookie(session.token, request.protocol === 'https'),
+      );
+      return {
+        success: true,
+        sessionToken: session.token,
+        expiresAt: session.expiresAt,
+      };
     },
   );
 
@@ -172,7 +191,7 @@ export async function authRoutes(app: FastifyInstance) {
       return reply.code(400).send({ success: false, message: '新 Token 至少 6 个字符' });
     }
 
-    if (oldToken !== config.authToken) {
+    if (!secureTokenEqual(oldToken, config.authToken)) {
       return reply.code(403).send({ success: false, message: '旧 Token 验证失败' });
     }
 
@@ -186,6 +205,12 @@ export async function authRoutes(app: FastifyInstance) {
 
     // Update runtime config
     config.authToken = newToken;
+    revokeAllAdminSessions();
+    const session = createAdminSession();
+    reply.header(
+      'set-cookie',
+      buildAdminSessionCookie(session.token, request.protocol === 'https'),
+    );
 
     try {
       const createdAt = formatUtcSqlDateTime(new Date());
@@ -199,9 +224,28 @@ export async function authRoutes(app: FastifyInstance) {
       }).run();
     } catch {}
 
-    return { success: true, message: 'Token 已更新' };
+    return {
+      success: true,
+      message: 'Token 已更新',
+      sessionToken: session.token,
+      expiresAt: session.expiresAt,
+    };
     },
   );
+
+  app.post('/api/auth/logout', async (request, reply) => {
+    const auth = typeof request.headers.authorization === 'string'
+      ? request.headers.authorization.replace(/^Bearer\s+/i, '').trim()
+      : '';
+    const cookieToken = parseCookieValue(request.headers.cookie, ADMIN_SESSION_COOKIE);
+    revokeAdminSession(auth);
+    revokeAdminSession(cookieToken);
+    reply.header(
+      'set-cookie',
+      buildExpiredAdminSessionCookie(request.protocol === 'https'),
+    );
+    return { success: true };
+  });
 
   // Get masked current token (for display). Used by the Settings page on
   // an already-authenticated session — the global admin auth middleware

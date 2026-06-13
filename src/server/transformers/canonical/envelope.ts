@@ -3,6 +3,7 @@ import type { CanonicalAttachment } from './attachments.js';
 import type {
   CanonicalCliProfile,
   CanonicalContinuation,
+  CanonicalGenerationConfig,
   CanonicalMessage,
   CanonicalOperation,
   CanonicalReasoningRequest,
@@ -19,8 +20,10 @@ export type CreateCanonicalRequestEnvelopeInput = {
   stream?: boolean;
   messages?: CanonicalMessage[];
   reasoning?: CanonicalReasoningRequest;
+  generation?: CanonicalGenerationConfig;
   tools?: CanonicalTool[];
   toolChoice?: CanonicalToolChoice;
+  parallelToolCalls?: boolean;
   continuation?: CanonicalContinuation;
   metadata?: Record<string, unknown>;
   passthrough?: Record<string, unknown>;
@@ -63,8 +66,12 @@ export function createCanonicalRequestEnvelope(
     stream: input.stream === true,
     messages: Array.isArray(input.messages) ? input.messages : [],
     ...(input.reasoning ? { reasoning: input.reasoning } : {}),
+    ...(input.generation ? { generation: cloneJsonValue(input.generation) } : {}),
     ...(Array.isArray(input.tools) && input.tools.length > 0 ? { tools: input.tools } : {}),
     ...(input.toolChoice !== undefined ? { toolChoice: input.toolChoice } : {}),
+    ...(typeof input.parallelToolCalls === 'boolean'
+      ? { parallelToolCalls: input.parallelToolCalls }
+      : {}),
     ...(normalizeCanonicalContinuation(input.continuation)
       ? { continuation: normalizeCanonicalContinuation(input.continuation) }
       : {}),

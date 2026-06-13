@@ -116,6 +116,7 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     smtpTo: env.SMTP_TO || '',
     notifyCooldownSec: Math.max(0, Math.trunc(parseNumber(env.NOTIFY_COOLDOWN_SEC, 300))),
     adminIpAllowlist: parseCsvList(env.ADMIN_IP_ALLOWLIST),
+    trustProxy: parseBoolean(env.TRUST_PROXY, false),
     port: Math.trunc(parseNumber(env.PORT, 4000)),
     listenHost: parseListenHost(env),
     dataDir,
@@ -130,6 +131,7 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     ) ?? TOKEN_ROUTER_FAILURE_COOLDOWN_MAX_SEC_CEILING,
     tokenRouterCacheTtlMs: Math.max(100, Math.trunc(parseNumber(env.TOKEN_ROUTER_CACHE_TTL_MS, 1_500))),
     proxyMaxChannelAttempts: Math.max(1, Math.trunc(parseNumber(env.PROXY_MAX_CHANNEL_ATTEMPTS, 3))),
+    anthropicDefaultMaxTokens: Math.max(1, Math.trunc(parseNumber(env.ANTHROPIC_DEFAULT_MAX_TOKENS, 8_192))),
     proxyStickySessionEnabled: parseBoolean(env.PROXY_STICKY_SESSION_ENABLED, true),
     proxyStickySessionTtlMs: Math.max(30_000, Math.trunc(parseNumber(env.PROXY_STICKY_SESSION_TTL_MS, 30 * 60 * 1000))),
     proxySessionChannelConcurrencyLimit: Math.max(0, Math.trunc(parseNumber(env.PROXY_SESSION_CHANNEL_CONCURRENCY_LIMIT, 2))),
@@ -158,7 +160,7 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     proxyFileRetentionDays: Math.max(0, Math.trunc(parseNumber(env.PROXY_FILE_RETENTION_DAYS, 30))),
     proxyFileRetentionPruneIntervalMinutes: Math.max(1, Math.trunc(parseNumber(env.PROXY_FILE_RETENTION_PRUNE_INTERVAL_MINUTES, 60))),
     proxyErrorKeywords: parseCsvList(env.PROXY_ERROR_KEYWORDS),
-    proxyEmptyContentFailEnabled: parseBoolean(env.PROXY_EMPTY_CONTENT_FAIL, false),
+    proxyEmptyContentFailEnabled: parseBoolean(env.PROXY_EMPTY_CONTENT_FAIL, true),
     globalBlockedBrands: [] as string[],
     globalAllowedModels: [] as string[],
     codexResponsesWebsocketBeta: parseOptionalSecret(env.CODEX_RESPONSES_WEBSOCKET_BETA) || 'responses_websockets=2026-02-06',
@@ -184,7 +186,7 @@ export function buildFastifyOptions(
 ): FastifyServerOptions {
   return {
     logger: true,
-    trustProxy: true,
+    trustProxy: appConfig.trustProxy,
     bodyLimit: appConfig.requestBodyLimit,
   };
 }

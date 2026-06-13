@@ -1,5 +1,10 @@
 import { toOpenAiChatFileBlock } from '../../shared/inputFile.js';
-import type { NormalizedFinalResponse } from '../../shared/normalized.js';
+import {
+  createStreamTransformContext,
+  normalizeUpstreamStreamEvent,
+  pullSseEventsWithDone,
+  type NormalizedFinalResponse,
+} from '../../shared/normalized.js';
 import { extractReasoningMetadataFromGeminiRequest } from './convert.js';
 
 type GeminiRecord = Record<string, unknown>;
@@ -159,6 +164,8 @@ function extractToolChoice(toolConfig: unknown): string | undefined {
 
 function buildGeminiMessages(body: GeminiRecord): Array<Record<string, unknown>> {
   const messages: Array<Record<string, unknown>> = [];
+  const pendingToolCallIdsByName = new Map<string, string[]>();
+  let nextSyntheticToolCallIndex = 0;
 
   if (isRecord(body.systemInstruction) && Array.isArray(body.systemInstruction.parts)) {
     const content = toOpenAiContent(
@@ -182,17 +189,29 @@ function buildGeminiMessages(body: GeminiRecord): Array<Record<string, unknown>>
       : [];
 
     const toolCalls = parts
-      .map((part, index) => {
+      .map((part) => {
         const functionCall = isRecord(part.functionCall) ? part.functionCall : null;
         const name = asTrimmedString(functionCall?.name);
         if (!functionCall || !name) return null;
+        const id = asTrimmedString(functionCall.id) || `call_${nextSyntheticToolCallIndex}`;
+        nextSyntheticToolCallIndex += 1;
+        const pendingIds = pendingToolCallIdsByName.get(name) || [];
+        pendingIds.push(id);
+        pendingToolCallIdsByName.set(name, pendingIds);
         return {
-          id: asTrimmedString(functionCall.id) || `call_${index}`,
+          id,
           type: 'function',
           function: {
             name,
             arguments: JSON.stringify(functionCall.args ?? {}),
           },
+          ...(asTrimmedString(part.thoughtSignature)
+            ? {
+              provider_specific_fields: {
+                thought_signature: asTrimmedString(part.thoughtSignature),
+              },
+            }
+            : {}),
         };
       })
       .filter((item): item is NonNullable<typeof item> => !!item);
@@ -205,10 +224,24 @@ function buildGeminiMessages(body: GeminiRecord): Array<Record<string, unknown>>
       for (let index = 0; index < functionResponses.length; index += 1) {
         const functionResponse = functionResponses[index] as GeminiRecord;
         const toolName = asTrimmedString(functionResponse.name) || `tool_${index}`;
+        const explicitToolCallId = asTrimmedString(functionResponse.id);
+        const pendingIds = pendingToolCallIdsByName.get(toolName) || [];
+        let toolCallId = explicitToolCallId;
+        if (toolCallId) {
+          const matchingIndex = pendingIds.indexOf(toolCallId);
+          if (matchingIndex >= 0) pendingIds.splice(matchingIndex, 1);
+        } else {
+          toolCallId = pendingIds.shift() || toolName;
+        }
+        if (pendingIds.length > 0) {
+          pendingToolCallIdsByName.set(toolName, pendingIds);
+        } else {
+          pendingToolCallIdsByName.delete(toolName);
+        }
         const toolResponse = functionResponse.response;
         messages.push({
           role: 'tool',
-          tool_call_id: toolName,
+          tool_call_id: toolCallId,
           content: JSON.stringify(toolResponse ?? {}),
         });
       }
@@ -262,8 +295,23 @@ export function buildOpenAiBodyFromGeminiRequest(input: {
   if (Number.isFinite(temperature)) openAiBody.temperature = temperature;
   const topP = Number(generationConfig?.topP);
   if (Number.isFinite(topP)) openAiBody.top_p = topP;
+  const topK = Number(generationConfig?.topK);
+  if (Number.isFinite(topK)) openAiBody.top_k = topK;
   if (Array.isArray(generationConfig?.stopSequences) && generationConfig!.stopSequences.length > 0) {
     openAiBody.stop = generationConfig!.stopSequences;
+  }
+  const responseMimeType = asTrimmedString(generationConfig?.responseMimeType).toLowerCase();
+  const responseSchema = generationConfig?.responseJsonSchema ?? generationConfig?.responseSchema;
+  if (responseMimeType === 'application/json') {
+    openAiBody.response_format = isRecord(responseSchema)
+      ? {
+        type: 'json_schema',
+        json_schema: {
+          name: 'gemini_response',
+          schema: responseSchema,
+        },
+      }
+      : { type: 'json_object' };
   }
 
   const tools = extractToolDeclarations(input.body.tools);
@@ -285,6 +333,116 @@ export function buildOpenAiBodyFromGeminiRequest(input: {
   }
 
   return openAiBody;
+}
+
+export function normalizeUpstreamSseTextToFinal(input: {
+  rawText: string;
+  modelName: string;
+}): {
+  normalized: NormalizedFinalResponse;
+  payloads: unknown[];
+} {
+  const context = createStreamTransformContext(input.modelName);
+  const toolCalls = new Map<number, {
+    id?: string;
+    name?: string;
+    arguments: string;
+    thoughtSignature?: string;
+  }>();
+  const payloads: unknown[] = [];
+  let content = '';
+  let reasoningContent = '';
+  let reasoningSignature: string | undefined;
+  let finishReason = '';
+
+  const terminatedText = input.rawText.endsWith('\n\n')
+    ? input.rawText
+    : `${input.rawText}\n\n`;
+  const { events } = pullSseEventsWithDone(terminatedText);
+  for (const event of events) {
+    if (event.data === '[DONE]') {
+      if (!finishReason) finishReason = toolCalls.size > 0 ? 'tool_calls' : 'stop';
+      continue;
+    }
+
+    let payload: unknown;
+    try {
+      payload = JSON.parse(event.data);
+    } catch {
+      continue;
+    }
+    payloads.push(payload);
+    const payloadRecord = isRecord(payload) ? payload : null;
+    const eventType = asTrimmedString(event.event).toLowerCase();
+    const payloadType = asTrimmedString(payloadRecord?.type).toLowerCase();
+    const responseStatus = isRecord(payloadRecord?.response)
+      ? asTrimmedString(payloadRecord.response.status).toLowerCase()
+      : '';
+    if (
+      eventType === 'error'
+      || eventType === 'response.failed'
+      || payloadType === 'error'
+      || payloadType === 'response.failed'
+      || responseStatus === 'failed'
+    ) {
+      const errorRecord = isRecord(payloadRecord?.error)
+        ? payloadRecord.error
+        : (isRecord(payloadRecord?.response) && isRecord(payloadRecord.response.error)
+          ? payloadRecord.response.error
+          : null);
+      const message = asTrimmedString(errorRecord?.message)
+        || 'Upstream SSE terminated with a failure event';
+      throw new Error(message);
+    }
+
+    const normalizedEvent = normalizeUpstreamStreamEvent(payload, context, input.modelName);
+    if (normalizedEvent.contentDelta) content += normalizedEvent.contentDelta;
+    if (normalizedEvent.reasoningDelta) reasoningContent += normalizedEvent.reasoningDelta;
+    if (normalizedEvent.reasoningSignature) {
+      reasoningSignature = normalizedEvent.reasoningSignature;
+    }
+    if (normalizedEvent.finishReason) finishReason = normalizedEvent.finishReason;
+
+    for (const toolCallDelta of normalizedEvent.toolCallDeltas || []) {
+      const current = toolCalls.get(toolCallDelta.index) || { arguments: '' };
+      if (toolCallDelta.id) current.id = toolCallDelta.id;
+      if (toolCallDelta.name) current.name = toolCallDelta.name;
+      if (toolCallDelta.argumentsDelta) current.arguments += toolCallDelta.argumentsDelta;
+      if (toolCallDelta.thoughtSignature) {
+        current.thoughtSignature = toolCallDelta.thoughtSignature;
+      }
+      toolCalls.set(toolCallDelta.index, current);
+      context.toolCalls[toolCallDelta.index] = {
+        ...(current.id ? { id: current.id } : {}),
+        ...(current.name ? { name: current.name } : {}),
+        arguments: current.arguments,
+        ...(current.thoughtSignature ? { thoughtSignature: current.thoughtSignature } : {}),
+      };
+    }
+  }
+
+  const normalizedToolCalls = Array.from(toolCalls.entries())
+    .sort(([leftIndex], [rightIndex]) => leftIndex - rightIndex)
+    .map(([index, toolCall]) => ({
+      id: toolCall.id || `call_${index}`,
+      name: toolCall.name || `tool_${index}`,
+      arguments: toolCall.arguments,
+      ...(toolCall.thoughtSignature ? { thoughtSignature: toolCall.thoughtSignature } : {}),
+    }));
+
+  return {
+    normalized: {
+      id: context.id,
+      model: context.model || input.modelName,
+      created: context.created,
+      content,
+      reasoningContent,
+      ...(reasoningSignature ? { reasoningSignature } : {}),
+      finishReason: finishReason || (normalizedToolCalls.length > 0 ? 'tool_calls' : 'stop'),
+      toolCalls: normalizedToolCalls,
+    },
+    payloads,
+  };
 }
 
 function mapFinishReason(finishReason: string): string {
@@ -329,6 +487,9 @@ export function serializeNormalizedFinalToGemini(input: {
     parts.push({
       text: input.normalized.reasoningContent,
       thought: true,
+      ...(input.normalized.reasoningSignature
+        ? { thoughtSignature: input.normalized.reasoningSignature }
+        : {}),
     });
   }
   if (input.normalized.content) {
@@ -343,6 +504,7 @@ export function serializeNormalizedFinalToGemini(input: {
         name: toolCall.name,
         args: parseJsonIfPossible(toolCall.arguments),
       },
+      ...(toolCall.thoughtSignature ? { thoughtSignature: toolCall.thoughtSignature } : {}),
     });
   }
 

@@ -46,11 +46,19 @@ export type CanonicalFilePart = {
   filename?: string;
 };
 
+export type CanonicalAudioPart = {
+  type: 'audio';
+  data: string;
+  format?: string;
+  mimeType?: string | null;
+};
+
 export type CanonicalToolCallPart = {
   type: 'tool_call';
   id: string;
   name: string;
   argumentsJson: string;
+  thoughtSignature?: string;
 };
 
 export type CanonicalToolResultPart = {
@@ -65,6 +73,7 @@ export type CanonicalContentPart =
   | CanonicalTextPart
   | CanonicalImagePart
   | CanonicalFilePart
+  | CanonicalAudioPart
   | CanonicalToolCallPart
   | CanonicalToolResultPart;
 
@@ -96,6 +105,28 @@ export type CanonicalContinuation = {
   turnState?: string;
 };
 
+export type CanonicalGenerationConfig = {
+  maxOutputTokens?: number;
+  maxToolCalls?: number;
+  temperature?: number;
+  topP?: number;
+  topK?: number;
+  stopSequences?: string[];
+  responseFormat?: unknown;
+  modalities?: string[];
+  audio?: Record<string, unknown>;
+  serviceTier?: string;
+  topLogprobs?: number;
+  logitBias?: Record<string, number>;
+  safetyIdentifier?: string;
+  user?: string;
+  verbosity?: string;
+  streamOptionsIncludeUsage?: boolean;
+  promptCacheRetention?: unknown;
+  background?: boolean;
+  truncation?: unknown;
+};
+
 export type CanonicalRequestEnvelope = {
   operation: CanonicalOperation;
   surface: CanonicalSurface;
@@ -104,8 +135,10 @@ export type CanonicalRequestEnvelope = {
   stream: boolean;
   messages: CanonicalMessage[];
   reasoning?: CanonicalReasoningRequest;
+  generation?: CanonicalGenerationConfig;
   tools?: CanonicalTool[];
   toolChoice?: CanonicalToolChoice;
+  parallelToolCalls?: boolean;
   continuation?: CanonicalContinuation;
   metadata?: Record<string, unknown>;
   passthrough?: Record<string, unknown>;

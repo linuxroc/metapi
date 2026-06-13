@@ -108,11 +108,13 @@ describe('anthropicMessagesTransformer protocol contract', () => {
         turnState: 'turn-state-claude-bridge-1',
       },
       tools: [{ name: 'lookup', inputSchema: { type: 'object' } }],
+    }, {
+      defaultMaxOutputTokens: 8_192,
     });
 
     expect(body).toMatchObject({
       model: 'claude-sonnet-4-5',
-      max_tokens: 4096,
+      max_tokens: 8_192,
       metadata: {
         user_id: 'session-claude-bridge-1',
         metapi_turn_state: 'turn-state-claude-bridge-1',

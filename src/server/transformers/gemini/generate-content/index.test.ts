@@ -142,7 +142,7 @@ describe('geminiGenerateContentTransformer.inbound', () => {
           functionDeclarations: [
             {
               name: 'lookup',
-              parameters: { type: 'object' },
+              parametersJsonSchema: { type: 'object' },
             },
           ],
         },
@@ -155,6 +155,7 @@ describe('geminiGenerateContentTransformer.inbound', () => {
       generationConfig: {
         thinkingConfig: {
           thinkingBudget: 512,
+          includeThoughts: true,
         },
       },
     });
@@ -201,6 +202,201 @@ describe('geminiGenerateContentTransformer.inbound', () => {
         },
       ],
     });
+  });
+
+  it('compatibility preserves Gemini function call IDs for tool responses', () => {
+    const body = geminiGenerateContentTransformer.compatibility.buildOpenAiBodyFromGeminiRequest({
+      modelName: 'gpt-5.4',
+      stream: false,
+      body: {
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_real',
+                  name: 'lookup',
+                  args: { query: 'metapi' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  name: 'lookup',
+                  response: { result: 'ok' },
+                },
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(body.messages).toEqual([
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [
+          {
+            id: 'call_real',
+            type: 'function',
+            function: {
+              name: 'lookup',
+              arguments: '{"query":"metapi"}',
+            },
+          },
+        ],
+      },
+      {
+        role: 'tool',
+        tool_call_id: 'call_real',
+        content: '{"result":"ok"}',
+      },
+    ]);
+  });
+
+  it('compatibility pairs repeated Gemini function names with call IDs in order', () => {
+    const body = geminiGenerateContentTransformer.compatibility.buildOpenAiBodyFromGeminiRequest({
+      modelName: 'gpt-5.4',
+      stream: false,
+      body: {
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              { functionCall: { id: 'call_one', name: 'lookup', args: { query: 'one' } } },
+              { functionCall: { id: 'call_two', name: 'lookup', args: { query: 'two' } } },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              { functionResponse: { name: 'lookup', response: { result: 1 } } },
+              { functionResponse: { name: 'lookup', response: { result: 2 } } },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(body.messages).toMatchObject([
+      {
+        tool_calls: [
+          { id: 'call_one' },
+          { id: 'call_two' },
+        ],
+      },
+      { role: 'tool', tool_call_id: 'call_one' },
+      { role: 'tool', tool_call_id: 'call_two' },
+    ]);
+  });
+
+  it('normalizes OpenAI SSE before serializing Gemini compatibility responses', () => {
+    const result = geminiGenerateContentTransformer.compatibility.normalizeUpstreamSseTextToFinal({
+      modelName: 'gpt-4.1',
+      rawText: [
+        'data: {"id":"chatcmpl_1","model":"gpt-4.1","choices":[{"delta":{"role":"assistant","content":"hello "},"finish_reason":null}]}',
+        '',
+        'data: {"id":"chatcmpl_1","model":"gpt-4.1","choices":[{"delta":{"content":"world"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}',
+        '',
+        'data: [DONE]',
+        '',
+        '',
+      ].join('\n'),
+    });
+
+    expect(result.normalized).toMatchObject({
+      id: 'chatcmpl_1',
+      model: 'gpt-4.1',
+      content: 'hello world',
+      finishReason: 'stop',
+      toolCalls: [],
+    });
+    expect(result.payloads).toHaveLength(2);
+  });
+
+  it('does not duplicate Responses tool arguments across delta, done, and completed events', () => {
+    const result = geminiGenerateContentTransformer.compatibility.normalizeUpstreamSseTextToFinal({
+      modelName: 'gpt-5.4',
+      rawText: [
+        'event: response.created',
+        'data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}',
+        '',
+        'event: response.output_item.added',
+        'data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"lookup","arguments":""}}',
+        '',
+        'event: response.function_call_arguments.delta',
+        'data: {"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_1","call_id":"call_1","delta":"{\\"query\\":"}',
+        '',
+        'event: response.function_call_arguments.delta',
+        'data: {"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_1","call_id":"call_1","delta":"\\"metapi\\"}"}',
+        '',
+        'event: response.function_call_arguments.done',
+        'data: {"type":"response.function_call_arguments.done","output_index":0,"item_id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{\\"query\\":\\"metapi\\"}"}',
+        '',
+        'event: response.completed',
+        'data: {"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.4","status":"completed","output":[{"id":"fc_1","type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\\"query\\":\\"metapi\\"}"}]}}',
+        '',
+        '',
+      ].join('\n'),
+    });
+
+    expect(result.normalized).toMatchObject({
+      id: 'resp_1',
+      finishReason: 'tool_calls',
+      toolCalls: [
+        {
+          id: 'call_1',
+          name: 'lookup',
+          arguments: '{"query":"metapi"}',
+        },
+      ],
+    });
+  });
+
+  it('rejects failed upstream SSE terminals instead of converting them to STOP', () => {
+    expect(() => (
+      geminiGenerateContentTransformer.compatibility.normalizeUpstreamSseTextToFinal({
+        modelName: 'gpt-5.4',
+        rawText: [
+          'event: response.failed',
+          'data: {"type":"response.failed","response":{"id":"resp_fail","status":"failed","error":{"message":"tool execution failed"}}}',
+          '',
+          '',
+        ].join('\n'),
+      })
+    )).toThrow('tool execution failed');
+  });
+
+  it('keeps Gemini parallel tool calls distinct when they arrive in separate SSE chunks', () => {
+    const result = geminiGenerateContentTransformer.compatibility.normalizeUpstreamSseTextToFinal({
+      modelName: 'gemini-2.5-pro',
+      rawText: [
+        'data: {"candidates":[{"content":{"parts":[{"functionCall":{"id":"call_a","name":"lookup_a","args":{"x":1}}}]}}]}',
+        '',
+        'data: {"candidates":[{"content":{"parts":[{"functionCall":{"id":"call_b","name":"lookup_b","args":{"y":2}}}]},"finishReason":"STOP"}]}',
+        '',
+        '',
+      ].join('\n'),
+    });
+
+    expect(result.normalized.toolCalls).toEqual([
+      {
+        id: 'call_a',
+        name: 'lookup_a',
+        arguments: '{"x":1}',
+      },
+      {
+        id: 'call_b',
+        name: 'lookup_b',
+        arguments: '{"y":2}',
+      },
+    ]);
   });
 
   it('preserves native Gemini request fields through normalization', () => {

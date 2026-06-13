@@ -5,7 +5,7 @@ import { readRuntimeResponseText } from '../executors/types.js';
 type ResponsesTerminalStatus = 'completed' | 'incomplete';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object';
+  return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
 function asTrimmedString(value: unknown): string {
@@ -19,6 +19,13 @@ function parseResponsesSsePayload(data: string): Record<string, unknown> | null 
   } catch {
     return null;
   }
+}
+
+function isTerminalResponsesEvent(eventType: string): boolean {
+  return eventType === 'error'
+    || eventType === 'response.completed'
+    || eventType === 'response.incomplete'
+    || eventType === 'response.failed';
 }
 
 function getResponsesFailureMessage(payload: Record<string, unknown>): string {
@@ -341,7 +348,12 @@ export function collectResponsesFinalPayloadFromSseText(
   for (const event of events) {
     if (event.data === '[DONE]') continue;
     const payload = parseResponsesSsePayload(event.data);
-    if (!payload) continue;
+    if (!payload) {
+      if (isTerminalResponsesEvent(event.event)) {
+        throw new Error(`upstream returned invalid ${event.event} SSE payload`);
+      }
+      continue;
+    }
 
     const payloadType = typeof payload.type === 'string' ? payload.type : '';
     const eventType = payloadType || event.event;

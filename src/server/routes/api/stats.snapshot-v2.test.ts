@@ -46,6 +46,7 @@ describe("stats snapshot v2 routes", () => {
 
   afterAll(async () => {
     await app.close();
+    await (await import("../../db/index.js")).closeDbConnections();
     if (previousDataDir === undefined) {
       delete process.env.DATA_DIR;
     } else {

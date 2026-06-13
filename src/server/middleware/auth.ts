@@ -3,6 +3,12 @@ import { FastifyRequest, FastifyReply } from 'fastify';
 import { config } from '../config.js';
 import { authorizeDownstreamToken, consumeManagedKeyRequest } from '../services/downstreamApiKeyService.js';
 import { EMPTY_DOWNSTREAM_ROUTING_POLICY, type DownstreamRoutingPolicy } from '../services/downstreamPolicyTypes.js';
+import {
+  ADMIN_SESSION_COOKIE,
+  isValidAdminSession,
+  parseCookieValue,
+} from '../services/adminSessionService.js';
+import { secureTokenEqual } from '../services/secureTokenCompare.js';
 
 export interface ProxyAuthContext {
   token: string;
@@ -79,15 +85,7 @@ export function findInvalidIpAllowlistEntries(allowlist: string[]): string[] {
   return allowlist.filter((item) => parseAllowlistEntry(item) === null);
 }
 
-export function extractClientIp(remoteIp: string | null | undefined, xForwardedFor?: string | string[] | undefined): string {
-  if (Array.isArray(xForwardedFor)) {
-    const first = xForwardedFor.find((item) => item && item.trim().length > 0);
-    if (first) {
-      return normalizeIp(first.split(',')[0]);
-    }
-  } else if (typeof xForwardedFor === 'string' && xForwardedFor.trim().length > 0) {
-    return normalizeIp(xForwardedFor.split(',')[0]);
-  }
+export function extractClientIp(remoteIp: string | null | undefined): string {
   return normalizeIp(remoteIp);
 }
 
@@ -107,19 +105,23 @@ export function isIpAllowed(clientIp: string, allowlist: string[]): boolean {
 }
 
 export async function authMiddleware(request: FastifyRequest, reply: FastifyReply) {
-  const clientIp = extractClientIp(request.ip, request.headers['x-forwarded-for']);
+  const clientIp = extractClientIp(request.ip);
   if (!isIpAllowed(clientIp, config.adminIpAllowlist)) {
     reply.code(403).send({ error: 'IP not allowed' });
     return;
   }
 
-  const auth = request.headers.authorization;
-  if (!auth) {
+  const auth = typeof request.headers.authorization === 'string'
+    ? request.headers.authorization
+    : '';
+  const bearerToken = auth.replace(/^Bearer\s+/i, '').trim();
+  const cookieToken = parseCookieValue(request.headers.cookie, ADMIN_SESSION_COOKIE);
+  const token = bearerToken || cookieToken;
+  if (!token) {
     reply.code(401).send({ error: 'Missing Authorization header' });
     return;
   }
-  const token = auth.replace('Bearer ', '');
-  if (token !== config.authToken) {
+  if (!secureTokenEqual(token, config.authToken) && !isValidAdminSession(token)) {
     reply.code(403).send({ error: 'Invalid token' });
     return;
   }

@@ -1122,7 +1122,7 @@ describe('chat proxy stream behavior', () => {
     expect(response.body).not.toContain('"stop_reason":"end_turn"');
   });
 
-  it('normalizes Claude thinking adaptive type for legacy upstreams on /v1/messages', async () => {
+  it('rejects adaptive thinking budgets instead of silently changing the thinking mode', async () => {
     fetchMock.mockResolvedValue(new Response(JSON.stringify({
       id: 'msg_headers_adaptive',
       type: 'message',
@@ -1145,11 +1145,13 @@ describe('chat proxy stream behavior', () => {
       },
     });
 
-    expect(response.statusCode).toBe(200);
-
-    const [_targetUrl, options] = fetchMock.mock.calls[0] as [string, any];
-    const forwardedBody = JSON.parse(options.body);
-    expect(forwardedBody.thinking).toEqual({ type: 'enabled', budget_tokens: 1024 });
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({
+      error: {
+        type: 'invalid_request_error',
+      },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('retries /v1/messages with normalized Claude body when upstream says messages is required', async () => {
@@ -1481,7 +1483,7 @@ describe('chat proxy stream behavior', () => {
     fetchMock
       .mockResolvedValueOnce(new Response(JSON.stringify({
         error: {
-          message: 'openai_error',
+          message: 'endpoint not found: /v1/responses',
           type: 'bad_response_status_code',
           code: 'bad_response_status_code',
         },
@@ -3408,7 +3410,7 @@ describe('chat proxy stream behavior', () => {
     expect(targetUrl).toContain('/v1/messages');
   });
 
-  it('prefers /v1/responses on openai platform for claude-family models on /v1/chat/completions', async () => {
+  it('keeps /v1/chat/completions on chat for openai platforms even with claude-family model names', async () => {
     fetchModelPricingCatalogMock.mockResolvedValue({
       models: [
         {
@@ -3459,10 +3461,10 @@ describe('chat proxy stream behavior', () => {
     expect(response.statusCode).toBe(200);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [targetUrl] = fetchMock.mock.calls[0] as [string, any];
-    expect(targetUrl).toContain('/v1/responses');
+    expect(targetUrl).toContain('/v1/chat/completions');
   });
 
-  it('falls back from /v1/responses to /v1/messages on openai platform when responses endpoint is unavailable', async () => {
+  it('falls back from chat to responses on openai platform when chat is unavailable', async () => {
     selectChannelMock.mockReturnValue({
       channel: { id: 11, routeId: 22 },
       site: { name: 'openai-site', url: 'https://api.openai.com', platform: 'openai' },
@@ -3474,7 +3476,10 @@ describe('chat proxy stream behavior', () => {
 
     fetchMock
       .mockResolvedValueOnce(new Response(JSON.stringify({
-        error: { message: 'Not Found', type: 'not_found_error' },
+        error: {
+          message: 'endpoint not found: /v1/chat/completions',
+          type: 'not_found_error',
+        },
       }), {
         status: 404,
         headers: { 'content-type': 'application/json' },
@@ -3505,8 +3510,8 @@ describe('chat proxy stream behavior', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     const [firstUrl] = fetchMock.mock.calls[0] as [string, any];
     const [secondUrl] = fetchMock.mock.calls[1] as [string, any];
-    expect(firstUrl).toContain('/v1/responses');
-    expect(secondUrl).toContain('/v1/chat/completions');
+    expect(firstUrl).toContain('/v1/chat/completions');
+    expect(secondUrl).toContain('/v1/responses');
   });
 
   it('falls back to /v1/responses for /v1/chat/completions when messages/chat endpoints return 502', async () => {
@@ -4487,7 +4492,7 @@ describe('chat proxy stream behavior', () => {
     expect(matches.length).toBe(1);
   });
 
-  it('emits finish_reason stop when /v1/chat/completions receives response.failed from /v1/responses upstream', async () => {
+  it('emits an error event when /v1/chat/completions receives response.failed from /v1/responses upstream', async () => {
     fetchModelPricingCatalogMock.mockResolvedValue({
       models: [
         {
@@ -4524,8 +4529,10 @@ describe('chat proxy stream behavior', () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.body).toContain('"finish_reason":"stop"');
-    expect(response.body).toContain('[DONE]');
+    expect(response.body).toContain('"type":"upstream_error"');
+    expect(response.body).toContain('tool execution failed');
+    expect(response.body).not.toContain('"finish_reason":"stop"');
+    expect(response.body).not.toContain('[DONE]');
     expect(recordSuccessMock).not.toHaveBeenCalled();
     expect(recordFailureMock).toHaveBeenCalledTimes(1);
   });
@@ -4966,7 +4973,7 @@ describe('chat proxy stream behavior', () => {
     expect(targetUrl).toContain('/v1/messages');
   });
 
-  it('falls back to /v1/messages when catalog only declares openai and chat endpoint fails', async () => {
+  it('keeps OpenAI-compatible sites off /v1/messages when the catalog only declares openai', async () => {
     fetchModelPricingCatalogMock.mockResolvedValue({
       models: [
         {
@@ -4980,7 +4987,7 @@ describe('chat proxy stream behavior', () => {
     fetchMock
       .mockResolvedValueOnce(new Response(JSON.stringify({
         error: {
-          message: 'openai_error',
+          message: 'unsupported endpoint /v1/chat/completions',
           type: 'bad_response_status_code',
           code: 'bad_response_status_code',
         },
@@ -4989,11 +4996,15 @@ describe('chat proxy stream behavior', () => {
         headers: { 'content-type': 'application/json' },
       }))
       .mockResolvedValueOnce(new Response(JSON.stringify({
-        id: 'msg_fallback_500',
-        type: 'message',
+        id: 'resp_fallback_openai_catalog',
+        object: 'response',
         model: 'upstream-gpt',
-        content: [{ type: 'text', text: 'fallback to messages from openai-only catalog' }],
-        stop_reason: 'end_turn',
+        status: 'completed',
+        output: [{
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: 'fallback to responses from openai-only catalog' }],
+        }],
         usage: { input_tokens: 12, output_tokens: 7, total_tokens: 19 },
       }), {
         status: 200,
@@ -5012,13 +5023,14 @@ describe('chat proxy stream behavior', () => {
 
     expect(response.statusCode).toBe(200);
     const body = response.json();
-    expect(body?.choices?.[0]?.message?.content).toContain('fallback to messages from openai-only catalog');
+    expect(body?.choices?.[0]?.message?.content).toContain('fallback to responses from openai-only catalog');
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     const [firstUrl] = fetchMock.mock.calls[0] as [string, any];
     const [secondUrl] = fetchMock.mock.calls[1] as [string, any];
     expect(firstUrl).toContain('/v1/chat/completions');
-    expect(secondUrl).toContain('/v1/messages');
+    expect(secondUrl).toContain('/v1/responses');
+    expect(secondUrl).not.toContain('/v1/messages');
   });
 
   it('downgrades endpoint when upstream returns convert_request_failed/not implemented', async () => {
@@ -5076,7 +5088,7 @@ describe('chat proxy stream behavior', () => {
     expect(secondUrl).toContain('/v1/messages');
   });
 
-  it('downgrades endpoint when upstream returns openai_error bad_response_status_code', async () => {
+  it('downgrades endpoint when upstream returns a localized endpoint-not-found error', async () => {
     fetchModelPricingCatalogMock.mockResolvedValue({
       models: [
         {
@@ -5090,21 +5102,20 @@ describe('chat proxy stream behavior', () => {
     fetchMock
       .mockResolvedValueOnce(new Response(JSON.stringify({
         error: {
-          message: 'openai_error',
-          type: 'bad_response_status_code',
-          code: 'bad_response_status_code',
+          message: '请求接口不存在，请检查请求路径',
+          type: 'invalid_request_error',
         },
       }), {
         status: 400,
         headers: { 'content-type': 'application/json' },
       }))
       .mockResolvedValueOnce(new Response(JSON.stringify({
-        id: 'msg_300',
+        id: 'msg_localized_endpoint_fallback',
         type: 'message',
         model: 'upstream-gpt',
-        content: [{ type: 'text', text: 'fallback from bad_response_status_code' }],
+        content: [{ type: 'text', text: 'fallback from localized endpoint error' }],
         stop_reason: 'end_turn',
-        usage: { input_tokens: 9, output_tokens: 5, total_tokens: 14 },
+        usage: { input_tokens: 8, output_tokens: 4, total_tokens: 12 },
       }), {
         status: 200,
         headers: { 'content-type': 'application/json' },
@@ -5121,13 +5132,52 @@ describe('chat proxy stream behavior', () => {
     });
 
     expect(response.statusCode).toBe(200);
-    const body = response.json();
-    expect(body?.choices?.[0]?.message?.content).toContain('fallback from bad_response_status_code');
-
+    expect(response.json()?.choices?.[0]?.message?.content).toContain(
+      'fallback from localized endpoint error',
+    );
     expect(fetchMock).toHaveBeenCalledTimes(2);
+
     const [firstUrl] = fetchMock.mock.calls[0] as [string, any];
     const [secondUrl] = fetchMock.mock.calls[1] as [string, any];
     expect(firstUrl).toContain('/v1/chat/completions');
     expect(secondUrl).toContain('/v1/messages');
+  });
+
+  it('does not downgrade a generic bad_response_status_code without endpoint evidence', async () => {
+    fetchModelPricingCatalogMock.mockResolvedValue({
+      models: [
+        {
+          modelName: 'upstream-gpt',
+          supportedEndpointTypes: ['/v1/chat/completions', '/v1/messages'],
+        },
+      ],
+      groupRatio: {},
+    });
+
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
+      error: {
+        message: 'openai_error',
+        type: 'bad_response_status_code',
+        code: 'bad_response_status_code',
+      },
+    }), {
+      status: 400,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      payload: {
+        model: 'gpt-4o-mini',
+        stream: false,
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [firstUrl] = fetchMock.mock.calls[0] as [string, any];
+    expect(firstUrl).toContain('/v1/chat/completions');
   });
 });

@@ -4,6 +4,7 @@ import {
   buildCanonicalRequestToOpenAiResponsesBody,
   parseOpenAiResponsesRequestToCanonical,
 } from './requestBridge.js';
+import { canonicalRequestToOpenAiChatBody } from '../../canonical/openAiRequestBridge.js';
 
 describe('openai responses request bridge', () => {
   it('parses OpenAI Responses bodies into canonical envelopes', () => {
@@ -122,5 +123,111 @@ describe('openai responses request bridge', () => {
         },
       ],
     });
+  });
+
+  it('preserves Chat fields that are valid only on the Responses target', () => {
+    const body = buildCanonicalRequestToOpenAiResponsesBody({
+      operation: 'generate',
+      surface: 'openai-chat',
+      cliProfile: 'generic',
+      requestedModel: 'gpt-5',
+      stream: false,
+      messages: [{ role: 'user', parts: [{ type: 'text', text: 'hello' }] }],
+      generation: {
+        maxToolCalls: 2,
+        promptCacheRetention: { scope: 'workspace' },
+        background: false,
+        truncation: 'auto',
+      },
+    });
+
+    expect(body).toMatchObject({
+      max_tool_calls: 2,
+      prompt_cache_retention: { scope: 'workspace' },
+      background: false,
+      truncation: 'auto',
+    });
+  });
+
+  it('round-trips Responses-only generation fields through canonical form', () => {
+    const parsed = parseOpenAiResponsesRequestToCanonical({
+      model: 'gpt-5',
+      input: 'hello',
+      max_tool_calls: 2,
+      prompt_cache_retention: { scope: 'workspace' },
+      background: false,
+      truncation: 'auto',
+    });
+
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.value?.generation).toMatchObject({
+      maxToolCalls: 2,
+      promptCacheRetention: { scope: 'workspace' },
+      background: false,
+      truncation: 'auto',
+    });
+
+    expect(buildCanonicalRequestToOpenAiResponsesBody(parsed.value!)).toMatchObject({
+      max_tool_calls: 2,
+      prompt_cache_retention: { scope: 'workspace' },
+      background: false,
+      truncation: 'auto',
+    });
+  });
+
+  it('preserves Responses-only tools in canonical form without leaking them into Chat bodies', () => {
+    const parsed = parseOpenAiResponsesRequestToCanonical({
+      model: 'gpt-5',
+      input: 'draw a diagram',
+      tools: [
+        {
+          type: 'function',
+          name: 'lookup',
+          parameters: { type: 'object' },
+        },
+        {
+          type: 'image_generation',
+          background: 'transparent',
+        },
+      ],
+      tool_choice: 'auto',
+    });
+
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.value?.tools).toEqual([
+      {
+        name: 'lookup',
+        inputSchema: { type: 'object' },
+      },
+      {
+        type: 'image_generation',
+        raw: {
+          type: 'image_generation',
+          background: 'transparent',
+        },
+      },
+    ]);
+
+    const responsesBody = buildCanonicalRequestToOpenAiResponsesBody(parsed.value!);
+    expect(responsesBody.tools).toEqual([
+      {
+        type: 'function',
+        name: 'lookup',
+        parameters: { type: 'object' },
+      },
+      {
+        type: 'image_generation',
+        background: 'transparent',
+      },
+    ]);
+
+    const chatBody = canonicalRequestToOpenAiChatBody(parsed.value!);
+    expect(chatBody.tools).toEqual([{
+      type: 'function',
+      function: {
+        name: 'lookup',
+        parameters: { type: 'object' },
+      },
+    }]);
   });
 });

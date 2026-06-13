@@ -1233,6 +1233,7 @@ export const api = {
   getTask: (id: string) => request(`/api/tasks/${encodeURIComponent(id)}`),
 
   // Auth management
+  logout: () => request("/api/auth/logout", { method: "POST" }),
   getAuthInfo: () => request("/api/settings/auth/info"),
   changeAuthToken: (oldToken: string, newToken: string) =>
     request("/api/settings/auth/change", {

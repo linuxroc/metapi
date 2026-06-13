@@ -75,12 +75,13 @@ describe('channelRecoveryProbeService', () => {
     await db.delete(schema.sites).run();
   });
 
-  afterAll(() => {
+  afterAll(async () => {
     config.proxySessionChannelConcurrencyLimit = originalConcurrencyLimit;
     resetChannelRecoveryProbeState();
     resetProxyChannelCoordinatorState();
     invalidateTokenRouterCache();
     resetSiteRuntimeHealthState();
+    await (await import('../db/index.js')).closeDbConnections();
     rmSync(dataDir, { recursive: true, force: true });
     if (originalDataDir === undefined) {
       delete process.env.DATA_DIR;

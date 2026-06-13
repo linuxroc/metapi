@@ -428,7 +428,7 @@ describe('settings and auth events', () => {
     expect(saved).toBeFalsy();
   });
 
-  it('returns current recognized admin IP in runtime settings response', async () => {
+  it('ignores forwarded IP headers when proxy trust is disabled', async () => {
     const response = await app.inject({
       method: 'GET',
       url: '/api/settings/runtime',
@@ -440,7 +440,7 @@ describe('settings and auth events', () => {
 
     expect(response.statusCode).toBe(200);
     const body = response.json() as { currentAdminIp?: string; serverTimeZone?: string };
-    expect(body.currentAdminIp).toBe('203.0.113.5');
+    expect(body.currentAdminIp).toBe('10.0.0.8');
     expect(typeof body.serverTimeZone).toBe('string');
     expect((body.serverTimeZone || '').length).toBeGreaterThan(0);
   });

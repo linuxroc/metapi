@@ -840,7 +840,7 @@ describe('gemini native proxy routes', () => {
 
     expect(response.statusCode).toBe(200);
     const [targetUrl, requestInit] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(targetUrl).toBe('https://api.openai.com/v1/responses');
+    expect(targetUrl).toBe('https://api.openai.com/v1/chat/completions');
     expect(requestInit.headers).toMatchObject({
       Authorization: 'Bearer openai-access-token',
       'Content-Type': 'application/json',
@@ -861,22 +861,16 @@ describe('gemini native proxy routes', () => {
       expect.objectContaining({ traceId: 801 }),
       expect.objectContaining({
         finalStatus: 'success',
-        finalUpstreamPath: '/v1/responses',
+        finalUpstreamPath: '/v1/chat/completions',
       }),
     );
     expect(JSON.parse(String(requestInit.body))).toEqual({
       model: 'gpt-4.1',
       stream: false,
-      input: [
+      messages: [
         {
-          type: 'message',
           role: 'user',
-          content: [
-            {
-              type: 'input_text',
-              text: 'hello',
-            },
-          ],
+          content: 'hello',
         },
       ],
     });
@@ -975,6 +969,69 @@ describe('gemini native proxy routes', () => {
     ]);
   });
 
+  it('normalizes OpenAI chat SSE into Gemini SSE instead of returning raw event text', async () => {
+    selectChannelMock.mockReturnValue({
+      channel: { id: 41, routeId: 22 },
+      site: { id: 77, name: 'openai-site', url: 'https://api.openai.com', platform: 'openai' },
+      account: { id: 37, username: 'openai-user@example.com' },
+      tokenName: 'default',
+      tokenValue: 'openai-access-token',
+      actualModel: 'gpt-4.1',
+    });
+    fetchMock.mockResolvedValue(new Response([
+      'data: {"id":"chatcmpl-gemini-sse","model":"gpt-4.1","choices":[{"delta":{"role":"assistant","content":"hello "},"finish_reason":null}]}',
+      '',
+      'data: {"id":"chatcmpl-gemini-sse","model":"gpt-4.1","choices":[{"delta":{"content":"from SSE"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}',
+      '',
+      'data: [DONE]',
+      '',
+    ].join('\n'), {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse',
+      headers: {
+        authorization: 'Bearer sk-managed-gemini',
+      },
+      payload: {
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: 'hello' }],
+          },
+        ],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('https://api.openai.com/v1/chat/completions');
+    expect(parseSsePayloads(response.body)).toEqual([
+      {
+        responseId: 'chatcmpl-gemini-sse',
+        modelVersion: 'gpt-4.1',
+        candidates: [
+          {
+            index: 0,
+            content: {
+              role: 'model',
+              parts: [{ text: 'hello from SSE' }],
+            },
+            finishReason: 'STOP',
+          },
+        ],
+        usageMetadata: {
+          promptTokenCount: 5,
+          candidatesTokenCount: 3,
+          totalTokenCount: 8,
+        },
+      },
+    ]);
+    expect(response.body).not.toContain('"text":"data:');
+  });
+
   it('exposes GeminiCLI downstream generateContent endpoint and wraps the downstream response payload', async () => {
     selectChannelMock.mockReturnValue({
       channel: { id: 42, routeId: 22 },
@@ -1027,14 +1084,14 @@ describe('gemini native proxy routes', () => {
 
     expect(response.statusCode).toBe(200);
     const [targetUrl, requestInit] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(targetUrl).toBe('https://api.openai.com/v1/responses');
+    expect(targetUrl).toBe('https://api.openai.com/v1/chat/completions');
     const forwardedBody = JSON.parse(String(requestInit.body));
     expect(forwardedBody).toMatchObject({
       model: 'gpt-4.1',
       stream: false,
     });
-    expect(Array.isArray(forwardedBody.input)).toBe(true);
-    expect(JSON.stringify(forwardedBody.input)).toContain('hello');
+    expect(Array.isArray(forwardedBody.messages)).toBe(true);
+    expect(JSON.stringify(forwardedBody.messages)).toContain('hello');
     expect(response.json()).toEqual({
       response: {
         responseId: 'resp-openai-2',
@@ -1980,6 +2037,68 @@ describe('gemini native proxy routes', () => {
     expect(firstUrl).toContain('key=gemini-key');
     expect(secondUrl).toContain('key=gemini-key-2');
     expect(response.json().candidates?.[0]?.content?.parts?.[0]?.text).toContain('ok from fallback');
+  });
+
+  it('retries the next channel when a buffered compatibility SSE response ends with response.failed', async () => {
+    selectChannelMock.mockReturnValue({
+      channel: { id: 11, routeId: 22 },
+      site: { id: 44, name: 'openai-compat-1', url: 'https://openai-compat-1.example.com', platform: 'openai' },
+      account: { id: 33, username: 'demo-user' },
+      tokenName: 'default',
+      tokenValue: 'compat-key-1',
+      actualModel: 'gpt-5.4',
+    });
+    selectNextChannelMock.mockReturnValue({
+      channel: { id: 12, routeId: 22 },
+      site: { id: 45, name: 'openai-compat-2', url: 'https://openai-compat-2.example.com', platform: 'openai' },
+      account: { id: 34, username: 'demo-user-2' },
+      tokenName: 'fallback',
+      tokenValue: 'compat-key-2',
+      actualModel: 'gpt-5.4',
+    });
+
+    fetchMock
+      .mockResolvedValueOnce(new Response([
+        'event: response.failed',
+        'data: {"type":"response.failed","response":{"id":"resp_fail","status":"failed","error":{"message":"tool execution failed"}}}',
+        '',
+        '',
+      ].join('\n'), {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 'chatcmpl_fallback',
+        model: 'gpt-5.4',
+        choices: [{
+          message: { role: 'assistant', content: 'ok from fallback' },
+          finish_reason: 'stop',
+        }],
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1beta/models/gemini-2.5-flash:generateContent',
+      headers: {
+        'x-goog-api-key': 'sk-managed-gemini',
+      },
+      payload: {
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().candidates?.[0]?.content?.parts?.[0]?.text).toBe('ok from fallback');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(recordFailureMock).toHaveBeenCalledWith(11, expect.objectContaining({
+      status: 502,
+      errorText: expect.stringContaining('tool execution failed'),
+    }));
+    expect(recordSuccessMock).toHaveBeenCalledTimes(1);
+    expect(recordSuccessMock).toHaveBeenCalledWith(12, expect.any(Number), 0, 'gpt-5.4');
   });
 
   it('falls back to the next channel when first Gemini channel returns 403 before any bytes are written', async () => {

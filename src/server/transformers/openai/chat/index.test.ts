@@ -370,7 +370,7 @@ describe('openAiChatTransformer.outbound', () => {
       totalTokens: 2,
     })).toMatchObject({
       choices: [{
-        finish_reason: 'stop',
+        finish_reason: 'error',
       }],
     });
   });
@@ -620,7 +620,7 @@ describe('openAiChatTransformer.stream', () => {
     });
   });
 
-  it('serializes response.failed terminal events with stop finish_reason instead of error', () => {
+  it('serializes response.failed terminal events with an error finish reason', () => {
     const context = openAiChatTransformer.createStreamContext('gpt-5');
     const event = openAiChatTransformer.transformStreamEvent({
       type: 'response.failed',
@@ -636,7 +636,7 @@ describe('openAiChatTransformer.stream', () => {
     );
 
     expect((payloads[0] as any).choices[0]).toMatchObject({
-      finish_reason: 'stop',
+      finish_reason: 'error',
     });
   });
 

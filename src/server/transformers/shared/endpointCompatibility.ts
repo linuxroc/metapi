@@ -103,6 +103,41 @@ function inferEndpointMentionFromText(text: string): CompatibilityEndpoint | nul
   return null;
 }
 
+function hasLocalizedEndpointMismatchHint(text: string): boolean {
+  if (!text) return false;
+  const endpointNoun = '(?:api\\s*)?(?:接口|端点|路径|路由|请求地址|请求路径)';
+  const mismatch = '(?:不存在|未找到|找不到|不支持|无效|错误|未实现|不可用|未开放|不匹配)';
+  return new RegExp(`${endpointNoun}[^\\n]{0,24}${mismatch}`, 'i').test(text)
+    || new RegExp(`${mismatch}[^\\n]{0,24}${endpointNoun}`, 'i').test(text);
+}
+
+function hasEnglishEndpointMismatchHint(text: string): boolean {
+  if (!text) return false;
+  const explicitPhrases = [
+    'unknown endpoint',
+    'unsupported endpoint',
+    'unsupported path',
+    'unrecognized request url',
+    'no route matched',
+    'endpoint not found',
+    'path not found',
+    'route not found',
+    'invalid endpoint',
+    'invalid path',
+    'invalid url',
+    'api not implemented',
+    'unsupported legacy protocol',
+  ];
+  if (explicitPhrases.some((phrase) => text.includes(phrase))) return true;
+
+  const endpointNoun = '(?:api\\s+)?(?:endpoint|path|route|request\\s+url|url)';
+  const mismatch = '(?:not\\s+found|does\\s+not\\s+exist|unknown|unsupported|not\\s+supported|invalid|not\\s+implemented|unavailable)';
+  return new RegExp(`\\b${endpointNoun}\\b[^\\n]{0,48}\\b${mismatch}\\b`, 'i').test(text)
+    || new RegExp(`\\b${mismatch}\\b[^\\n]{0,48}\\b${endpointNoun}\\b`, 'i').test(text)
+    || /\bcannot\s+(?:post|get|put|patch|delete)\s+\/v\d+\//i.test(text)
+    || /\/v\d+\/[a-z0-9/_:-]+[^\\n]{0,48}\b(?:not\s+found|unsupported|not\s+supported|not\s+implemented)\b/i.test(text);
+}
+
 export function buildMinimalJsonHeadersForCompatibility(input: {
   headers: Record<string, string>;
   endpoint: CompatibilityEndpoint;
@@ -183,19 +218,11 @@ export function hasEndpointMismatchHint(upstreamErrorText?: string | null): bool
   const parsed = parseEndpointErrorShape(upstreamErrorText);
   if (!parsed.text) return false;
 
-  const phrases = [
-    'not found',
-    'unknown endpoint',
-    'unsupported endpoint',
-    'unsupported path',
-    'unrecognized request url',
-    'no route matched',
-    'does not exist',
-    'invalid url',
-  ];
-  return phrases.some((phrase) => (
-    parsed.text.includes(phrase) || parsed.message.includes(phrase)
-  )) || inferSuggestedEndpointFromUpstreamError(upstreamErrorText) !== null;
+  return hasEnglishEndpointMismatchHint(parsed.text)
+    || hasEnglishEndpointMismatchHint(parsed.message)
+    || hasLocalizedEndpointMismatchHint(parsed.text)
+    || hasLocalizedEndpointMismatchHint(parsed.message)
+    || inferRequiredEndpointFromProtocolError(upstreamErrorText) !== null;
 }
 
 export function promoteRequiredEndpointCandidateAfterProtocolError(
@@ -261,42 +288,29 @@ export function isEndpointDowngradeError(status: number, upstreamErrorText?: str
   if (status < 400) return false;
   const parsed = parseEndpointErrorShape(upstreamErrorText);
   const text = parsed.text;
-  if (status === 404 || status === 405 || status === 415 || status === 501) return true;
+  if (status === 405 || status === 415 || status === 501) return true;
   if (!text) return false;
   const endpointMismatchHint = hasEndpointMismatchHint(upstreamErrorText);
+  const explicitEndpointCode = (
+    parsed.code === 'endpoint_not_found'
+    || parsed.code === 'unknown_endpoint'
+    || parsed.code === 'unsupported_endpoint'
+    || parsed.code === 'unsupported_path'
+    || parsed.type === 'unsupported_endpoint'
+    || parsed.type === 'unsupported_path'
+  );
 
   return (
     isEndpointDispatchDeniedError(status, upstreamErrorText)
+    || inferRequiredEndpointFromProtocolError(upstreamErrorText) !== null
     || text.includes('convert_request_failed')
-    || text.includes('not found')
-    || text.includes('unknown endpoint')
-    || text.includes('unsupported endpoint')
-    || text.includes('unsupported path')
-    || text.includes('unrecognized request url')
-    || text.includes('no route matched')
-    || text.includes('does not exist')
-    || (
-      text.includes('openai_error')
-      && endpointMismatchHint
-    )
-    || (
-      text.includes('upstream_error')
-      && endpointMismatchHint
-    )
-    || text.includes('bad_response_status_code')
+    || explicitEndpointCode
+    || endpointMismatchHint
     || text.includes('unsupported media type')
     || text.includes("only 'application/json' is allowed")
     || text.includes('only "application/json" is allowed')
-    || (status === 400 && text.includes('unsupported'))
-    || text.includes('not implemented')
-    || text.includes('api not implemented')
     || text.includes('unsupported legacy protocol')
     || parsed.code === 'convert_request_failed'
-    || parsed.code === 'not_found'
-    || parsed.code === 'endpoint_not_found'
-    || parsed.code === 'unknown_endpoint'
-    || parsed.code === 'unsupported_endpoint'
-    || parsed.code === 'bad_response_status_code'
     || (
       parsed.code === 'openai_error'
       && endpointMismatchHint
@@ -305,32 +319,12 @@ export function isEndpointDowngradeError(status: number, upstreamErrorText?: str
       parsed.code === 'upstream_error'
       && endpointMismatchHint
     )
-    || parsed.type === 'not_found_error'
-    || parsed.type === 'invalid_request_error'
-    || parsed.type === 'unsupported_endpoint'
-    || parsed.type === 'unsupported_path'
-    || parsed.type === 'bad_response_status_code'
     || (
       parsed.type === 'openai_error'
       && endpointMismatchHint
     )
     || (
       parsed.type === 'upstream_error'
-      && endpointMismatchHint
-    )
-    || parsed.message.includes('unknown endpoint')
-    || parsed.message.includes('unsupported endpoint')
-    || parsed.message.includes('unsupported path')
-    || parsed.message.includes('unrecognized request url')
-    || parsed.message.includes('no route matched')
-    || parsed.message.includes('does not exist')
-    || parsed.message.includes('bad_response_status_code')
-    || (
-      parsed.message === 'openai_error'
-      && endpointMismatchHint
-    )
-    || (
-      parsed.message === 'upstream_error'
       && endpointMismatchHint
     )
     || parsed.message.includes('unsupported media type')

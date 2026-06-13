@@ -51,6 +51,7 @@ describe('settings model availability probe runtime setting', () => {
 
   afterAll(async () => {
     await app.close();
+    await (await import('../../db/index.js')).closeDbConnections();
     rmSync(dataDir, { recursive: true, force: true });
     delete process.env.DATA_DIR;
   });

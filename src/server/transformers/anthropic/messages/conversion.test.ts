@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   convertAnthropicToolsToOpenAi,
-  convertOpenAiBodyToAnthropicMessagesBody,
+  convertOpenAiBodyToAnthropicMessagesBody as convertOpenAiBodyToAnthropicMessagesBodyRaw,
   convertOpenAiToolChoiceToAnthropic,
   convertOpenAiToolsToAnthropic,
   sanitizeAnthropicMessagesBody,
@@ -12,8 +12,20 @@ import { anthropicMessagesTransformer } from './index.js';
 import { extractAnthropicUsage, extractAnthropicUsageMetadata } from './usage.js';
 import { applyAnthropicMessagesAggregateEvent, createAnthropicMessagesAggregateState } from './aggregator.js';
 
+function convertOpenAiBodyToAnthropicMessagesBody(
+  body: Record<string, unknown>,
+  modelName: string,
+  stream: boolean,
+  options: { defaultMaxTokens?: number } = {},
+) {
+  return convertOpenAiBodyToAnthropicMessagesBodyRaw(body, modelName, stream, {
+    defaultMaxTokens: 8_192,
+    ...options,
+  });
+}
+
 describe('sanitizeAnthropicMessagesBody', () => {
-  it('drops top_p when temperature is present and normalizes adaptive thinking', () => {
+  it('drops top_p without changing adaptive thinking into manual thinking', () => {
     const result = sanitizeAnthropicMessagesBody({
       model: 'claude-opus',
       temperature: 0.6,
@@ -26,8 +38,7 @@ describe('sanitizeAnthropicMessagesBody', () => {
 
     expect(result.top_p).toBeUndefined();
     expect(result.thinking).toEqual({
-      type: 'enabled',
-      budget_tokens: 512,
+      type: 'adaptive',
     });
   });
 
@@ -138,6 +149,22 @@ describe('sanitizeAnthropicMessagesBody', () => {
     });
   });
 
+  it('keeps adaptive thinking semantics when cleaning a conflicting budget', () => {
+    const result = sanitizeAnthropicMessagesBody({
+      model: 'claude-opus-4-6',
+      thinking: {
+        type: 'adaptive',
+        budget_tokens: 1024,
+      },
+      output_config: {
+        effort: 'high',
+      },
+    });
+
+    expect(result.thinking).toEqual({ type: 'adaptive' });
+    expect(result.output_config).toEqual({ effort: 'high' });
+  });
+
   it('drops non-ephemeral cache_control markers while preserving valid tool block markers', () => {
     const result = sanitizeAnthropicMessagesBody({
       model: 'claude-opus-4-6',
@@ -195,6 +222,47 @@ describe('sanitizeAnthropicMessagesBody', () => {
 });
 
 describe('convertOpenAiBodyToAnthropicMessagesBody', () => {
+  it('maps modern OpenAI output token fields to Anthropic max_tokens', () => {
+    const body = convertOpenAiBodyToAnthropicMessagesBody(
+      {
+        model: 'gpt-5',
+        max_tokens: 64,
+        max_completion_tokens: 128,
+        max_output_tokens: 256,
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+      'claude-opus-4-6',
+      false,
+    );
+
+    expect(body.max_tokens).toBe(256);
+  });
+
+  it('uses an explicit configured fallback when OpenAI omits all token limits', () => {
+    const body = convertOpenAiBodyToAnthropicMessagesBody(
+      {
+        model: 'gpt-5',
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+      'claude-opus-4-6',
+      false,
+      { defaultMaxTokens: 16_384 },
+    );
+
+    expect(body.max_tokens).toBe(16_384);
+  });
+
+  it('rejects conversion when Anthropic max_tokens cannot be resolved', () => {
+    expect(() => convertOpenAiBodyToAnthropicMessagesBodyRaw(
+      {
+        model: 'gpt-5',
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+      'claude-opus-4-6',
+      false,
+    )).toThrow('Anthropic Messages requires max_tokens');
+  });
+
   it('maps OpenAI file blocks into Anthropic document blocks', () => {
     const base64Pdf = Buffer.from('%PDF-hello').toString('base64');
     const body = convertOpenAiBodyToAnthropicMessagesBody(
@@ -837,6 +905,26 @@ describe('anthropicMessagesInbound', () => {
       output_config: { effort: 'turbo' },
     });
     expect(invalidEffort.error?.statusCode).toBe(400);
+  });
+
+  it('rejects budget_tokens with adaptive thinking instead of changing modes', () => {
+    const result = anthropicMessagesInbound.parse({
+      model: 'claude-opus-4-6',
+      max_tokens: 512,
+      messages: [{ role: 'user', content: 'hello' }],
+      thinking: { type: 'adaptive', budget_tokens: 1024 },
+      output_config: { effort: 'high' },
+    });
+
+    expect(result.error).toMatchObject({
+      statusCode: 400,
+      payload: {
+        error: {
+          type: 'invalid_request_error',
+        },
+      },
+    });
+    expect(JSON.stringify(result.error?.payload)).toContain('budget_tokens is not supported');
   });
 
   it('rejects tool choice without a tool name', () => {

@@ -22,6 +22,7 @@ export type ProtocolParseContext = {
 
 export type ProtocolBuildContext = {
   cliProfile?: CanonicalCliProfile;
+  defaultMaxOutputTokens?: number;
 };
 
 export type ProtocolResponseContext = {

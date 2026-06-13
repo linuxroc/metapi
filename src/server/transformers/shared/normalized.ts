@@ -2,6 +2,7 @@ export {
   buildSyntheticOpenAiChunks,
   createClaudeDownstreamContext,
   createStreamTransformContext,
+  isExplicitErrorStopReason,
   normalizeStopReason,
   normalizeUpstreamFinalResponse,
   normalizeUpstreamStreamEvent,

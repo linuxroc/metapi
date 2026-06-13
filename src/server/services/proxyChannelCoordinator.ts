@@ -3,6 +3,10 @@ import {
   getCredentialModeFromExtraConfig,
   hasOauthProvider,
 } from './accountExtraConfig.js';
+import {
+  encodeSessionKeyPart,
+  normalizeSessionIdentifier,
+} from '../contracts/sessionIdentifier.js';
 
 type StickyEntry = {
   channelId: number;
@@ -46,6 +50,7 @@ export type AcquireProxyChannelLeaseResult =
   | { status: 'timeout'; waitMs: number };
 
 const stickySessionBindings = new Map<string, StickyEntry>();
+const MAX_STICKY_SESSION_BINDINGS = 10_000;
 const channelRuntimeStates = new Map<number, ChannelRuntimeState>();
 let nextLeaseId = 1;
 type SessionScopedChannelInput =
@@ -68,6 +73,14 @@ function cleanupExpiredStickyBindings(nowMs = Date.now()): void {
     if (entry.expiresAtMs <= nowMs) {
       stickySessionBindings.delete(key);
     }
+  }
+}
+
+function enforceStickyBindingCapacity(): void {
+  while (stickySessionBindings.size >= MAX_STICKY_SESSION_BINDINGS) {
+    const oldestKey = stickySessionBindings.keys().next().value;
+    if (typeof oldestKey !== 'string') break;
+    stickySessionBindings.delete(oldestKey);
   }
 }
 
@@ -146,7 +159,7 @@ class ProxyChannelCoordinator {
     downstreamApiKeyId?: number | null;
   }): string | null {
     if (!config.proxyStickySessionEnabled) return null;
-    const sessionId = String(input.sessionId || '').trim();
+    const sessionId = normalizeSessionIdentifier(input.sessionId);
     if (!sessionId) return null;
     const requestedModel = String(input.requestedModel || '').trim().toLowerCase();
     if (!requestedModel) return null;
@@ -155,7 +168,13 @@ class ProxyChannelCoordinator {
     const owner = typeof input.downstreamApiKeyId === 'number' && Number.isFinite(input.downstreamApiKeyId)
       ? `key:${Math.trunc(input.downstreamApiKeyId)}`
       : 'key:anonymous';
-    return [owner, clientKind, downstreamPath, requestedModel, sessionId].join('|');
+    return [
+      owner,
+      encodeSessionKeyPart(clientKind),
+      encodeSessionKeyPart(downstreamPath),
+      encodeSessionKeyPart(requestedModel),
+      encodeSessionKeyPart(sessionId),
+    ].join('|');
   }
 
   getStickyChannelId(stickySessionKey?: string | null, nowMs = Date.now()): number | null {
@@ -176,6 +195,7 @@ class ProxyChannelCoordinator {
     const normalizedKey = String(stickySessionKey || '').trim();
     if (!normalizedKey || !Number.isFinite(channelId) || channelId <= 0) return;
     cleanupExpiredStickyBindings();
+    enforceStickyBindingCapacity();
     stickySessionBindings.set(normalizedKey, {
       channelId: Math.trunc(channelId),
       expiresAtMs: Date.now() + getStickySessionTtlMs(),

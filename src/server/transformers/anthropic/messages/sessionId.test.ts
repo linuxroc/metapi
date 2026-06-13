@@ -318,6 +318,26 @@ describe('extractAnthropicMessagesSessionId', () => {
   });
 });
 
+describe('Anthropic session identifier bounds', () => {
+  it('rejects oversized and control-character tool ids', () => {
+    expect(extractAnthropicMessagesSessionId({
+      messages: [{
+        role: 'user',
+        content: [{
+          type: 'tool_result',
+          tool_use_id: `toolu_${'x'.repeat(300)}`,
+        }],
+      }],
+    })).toBeNull();
+    expect(extractAnthropicMessagesContinuationIdsFromResponse({
+      content: [{
+        type: 'tool_use',
+        id: 'toolu_ok\nspoofed',
+      }],
+    })).toEqual([]);
+  });
+});
+
 /**
  * Parameterized coverage for {@link extractAnthropicMessagesContinuationIdsFromResponse}.
  *

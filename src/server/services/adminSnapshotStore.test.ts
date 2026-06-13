@@ -34,7 +34,8 @@ describe("adminSnapshotStore", () => {
     await db.delete(schema.adminSnapshots).run();
   });
 
-  afterAll(() => {
+  afterAll(async () => {
+    await (await import("../db/index.js")).closeDbConnections();
     if (previousDataDir === undefined) {
       delete process.env.DATA_DIR;
     } else {

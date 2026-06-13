@@ -7,6 +7,7 @@ import { buildOpenAiBodyFromGeminiRequest } from './compatibility.js';
 import {
   reasoningEffortToGeminiThinkingConfig,
   resolveGeminiThinkingConfigFromRequest,
+  thinkingBudgetToGeminiThinkingConfig,
 } from './convert.js';
 
 function asTrimmedString(value: unknown): string {
@@ -25,6 +26,27 @@ function parseJsonString(raw: string): unknown {
   } catch {
     return { raw };
   }
+}
+
+function canonicalToolResultToGeminiResponse(
+  part: Extract<CanonicalContentPart, { type: 'tool_result' }>,
+): Record<string, unknown> {
+  let result: unknown;
+  if (part.resultJson !== undefined) {
+    result = part.resultJson;
+  } else if (part.resultText !== undefined) {
+    const trimmed = part.resultText.trim();
+    if (!trimmed) return {};
+    try {
+      result = JSON.parse(trimmed);
+    } catch {
+      result = part.resultText;
+    }
+  } else {
+    result = part.resultContent ?? '';
+  }
+
+  return isRecord(result) ? result : { result };
 }
 
 function parseDataUrl(value: string): { mimeType: string; data: string } | null {
@@ -142,11 +164,14 @@ function convertOpenAiContentToGeminiParts(content: unknown): Array<Record<strin
       continue;
     }
     if (type === 'input_audio') {
-      const data = asTrimmedString(item.data);
+      const audio = isRecord(item.input_audio) ? item.input_audio : item;
+      const data = asTrimmedString(audio.data);
       if (data) {
+        const format = asTrimmedString(audio.format);
         parts.push({
           inlineData: {
-            mime_type: 'audio/wav',
+            mime_type: asTrimmedString(audio.mime_type ?? audio.mimeType)
+              || (format === 'mp3' ? 'audio/mpeg' : `audio/${format || 'wav'}`),
             data,
           },
         });
@@ -255,6 +280,7 @@ export function buildGeminiGenerateContentRequestFromOpenAi(input: {
           role: 'user',
           parts: [{
             functionResponse: {
+              ...(toolCallId ? { id: toolCallId } : {}),
               name,
               response: {
                 result,
@@ -285,7 +311,11 @@ export function buildGeminiGenerateContentRequestFromOpenAi(input: {
         args = rawArguments;
       }
       const fcPart: Record<string, unknown> = {
-        functionCall: { name, args },
+        functionCall: {
+          ...(asTrimmedString(toolCall.id) ? { id: asTrimmedString(toolCall.id) } : {}),
+          name,
+          args,
+        },
       };
       const id = asTrimmedString(toolCall.id);
       const signature = thoughtSignatureById.get(id);
@@ -366,6 +396,7 @@ export function buildGeminiGenerateContentRequestFromOpenAi(input: {
 function canonicalPartToGeminiPart(
   part: CanonicalContentPart,
   toolNameById?: ReadonlyMap<string, string>,
+  injectDummyThoughtSignature = false,
 ): Record<string, unknown> | null {
   if (part.type === 'text') {
     return {
@@ -425,17 +456,31 @@ function canonicalPartToGeminiPart(
         name: part.name,
         args: parseJsonString(part.argumentsJson),
       },
+      ...(part.thoughtSignature
+        ? { thoughtSignature: part.thoughtSignature }
+        : (injectDummyThoughtSignature ? { thoughtSignature: DUMMY_THOUGHT_SIGNATURE } : {})),
+    };
+  }
+
+  if (part.type === 'audio') {
+    return {
+      inlineData: {
+        mimeType: part.mimeType || (
+          part.format === 'mp3'
+            ? 'audio/mpeg'
+            : `audio/${part.format || 'wav'}`
+        ),
+        data: part.data,
+      },
     };
   }
 
   if (part.type === 'tool_result') {
-    const response = part.resultJson ?? parseJsonString(part.resultText ?? '');
     return {
       functionResponse: {
+        id: part.toolCallId,
         name: toolNameById?.get(part.toolCallId) || 'unknown',
-        response: {
-          result: response,
-        },
+        response: canonicalToolResultToGeminiResponse(part),
       },
     };
   }
@@ -449,6 +494,20 @@ export function buildCanonicalRequestToGeminiGenerateContentBody(
   const contents: Array<Record<string, unknown>> = [];
   const systemParts: Array<Record<string, unknown>> = [];
   const toolNameById = new Map<string, string>();
+  const hasThinkingEnabled = !!(
+    request.reasoning?.budgetTokens !== undefined
+    || request.reasoning?.effort
+  );
+  const allowsDummyThoughtSignature = isDummyThoughtSafeModel(request.requestedModel);
+  const hasUnsignedToolCall = request.messages.some((message) => (
+    message.parts.some((part) => part.type === 'tool_call' && !part.thoughtSignature)
+  ));
+  const shouldDisableThinkingConfig = (
+    hasThinkingEnabled
+    && hasUnsignedToolCall
+    && !allowsDummyThoughtSignature
+  );
+  const injectDummyThoughtSignature = hasThinkingEnabled && allowsDummyThoughtSignature;
 
   for (const message of request.messages) {
     if (message.role === 'system' || message.role === 'developer') {
@@ -467,7 +526,11 @@ export function buildCanonicalRequestToGeminiGenerateContentBody(
     }
 
     const parts = message.parts
-      .map((part) => canonicalPartToGeminiPart(part, toolNameById))
+      .map((part) => canonicalPartToGeminiPart(
+        part,
+        toolNameById,
+        injectDummyThoughtSignature,
+      ))
       .filter((part): part is Record<string, unknown> => !!part);
 
     if (parts.length <= 0) continue;
@@ -480,10 +543,15 @@ export function buildCanonicalRequestToGeminiGenerateContentBody(
       continue;
     }
 
-    contents.push({
-      role: message.role === 'assistant' ? 'model' : 'user',
-      parts,
-    });
+    const role = message.role === 'assistant' ? 'model' : 'user';
+    const signedToolParts = parts.filter((part) => 'functionCall' in part && 'thoughtSignature' in part);
+    const otherParts = parts.filter((part) => !signedToolParts.includes(part));
+    if (signedToolParts.length > 0 && otherParts.length > 0) {
+      contents.push({ role, parts: otherParts });
+      contents.push({ role, parts: signedToolParts });
+    } else {
+      contents.push({ role, parts });
+    }
   }
 
   const payload: Record<string, unknown> = {
@@ -498,15 +566,51 @@ export function buildCanonicalRequestToGeminiGenerateContentBody(
   }
 
   const generationConfig: Record<string, unknown> = {};
-  if (request.reasoning?.budgetTokens !== undefined) {
-    generationConfig.thinkingConfig = {
-      thinkingBudget: request.reasoning.budgetTokens,
-    };
-  } else if (request.reasoning?.effort) {
-    generationConfig.thinkingConfig = reasoningEffortToGeminiThinkingConfig(
+  if (request.generation?.maxOutputTokens !== undefined) {
+    generationConfig.maxOutputTokens = request.generation.maxOutputTokens;
+  }
+  if (request.generation?.temperature !== undefined) {
+    generationConfig.temperature = request.generation.temperature;
+  }
+  if (request.generation?.topP !== undefined) {
+    generationConfig.topP = request.generation.topP;
+  }
+  if (request.generation?.topK !== undefined) {
+    generationConfig.topK = request.generation.topK;
+  }
+  if (request.generation?.stopSequences) {
+    generationConfig.stopSequences = request.generation.stopSequences;
+  }
+  if (isRecord(request.generation?.responseFormat)) {
+    const responseFormat = request.generation.responseFormat;
+    const responseFormatType = asTrimmedString(responseFormat.type).toLowerCase();
+    if (responseFormatType === 'json_object' || responseFormatType === 'json_schema') {
+      generationConfig.responseMimeType = 'application/json';
+    }
+    if (responseFormatType === 'json_schema' && isRecord(responseFormat.json_schema)) {
+      const schema = responseFormat.json_schema.schema;
+      if (isRecord(schema)) generationConfig.responseJsonSchema = schema;
+    }
+  }
+  if (!shouldDisableThinkingConfig && request.reasoning?.budgetTokens !== undefined) {
+    const thinkingConfig = thinkingBudgetToGeminiThinkingConfig(
       request.requestedModel,
-      request.reasoning.effort,
+      request.reasoning.budgetTokens,
     );
+    if (thinkingConfig) {
+      generationConfig.thinkingConfig = {
+        ...thinkingConfig,
+        includeThoughts: true,
+      };
+    }
+  } else if (!shouldDisableThinkingConfig && request.reasoning?.effort) {
+    generationConfig.thinkingConfig = {
+      ...reasoningEffortToGeminiThinkingConfig(
+        request.requestedModel,
+        request.reasoning.effort,
+      ),
+      includeThoughts: true,
+    };
   }
   if (Object.keys(generationConfig).length > 0) {
     payload.generationConfig = generationConfig;
@@ -519,7 +623,7 @@ export function buildCanonicalRequestToGeminiGenerateContentBody(
         functionDeclarations: functionTools.map((tool) => ({
           name: tool.name,
           ...(tool.description ? { description: tool.description } : {}),
-          ...(tool.inputSchema ? { parameters: tool.inputSchema } : {}),
+          ...(tool.inputSchema ? { parametersJsonSchema: tool.inputSchema } : {}),
         })),
       }];
     }
