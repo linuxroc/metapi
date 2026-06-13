@@ -1,4 +1,5 @@
 import { config } from '../config.js';
+import { isExplicitErrorStopReason } from '../transformers/shared/normalized.js';
 import { pullSseDataEvents } from './proxyUsageParser.js';
 
 type FailureResult = {
@@ -40,6 +41,36 @@ function hasToolCallLike(value: unknown): boolean {
   return false;
 }
 
+function hasMeaningfulContentPart(part: unknown): boolean {
+  if (!isRecord(part)) return false;
+  if (
+    hasNonEmptyString(part.text)
+    || hasNonEmptyString(part.output_text)
+    || hasNonEmptyString(part.content)
+    || hasNonEmptyString(part.reasoning)
+    || hasNonEmptyString(part.thinking)
+    || hasNonEmptyString(part.transcript)
+  ) {
+    return true;
+  }
+
+  const type = typeof part.type === 'string' ? part.type.trim().toLowerCase() : '';
+  if (
+    type === 'function_call'
+    || type === 'custom_tool_call'
+    || type === 'tool_call'
+    || type === 'tool_use'
+  ) {
+    return true;
+  }
+
+  if (isRecord(part.functionCall) || isRecord(part.function_call)) return true;
+  if (isRecord(part.inlineData) || isRecord(part.inline_data)) return true;
+  if (isRecord(part.fileData) || isRecord(part.file_data)) return true;
+  if (isRecord(part.audio) || isRecord(part.output_audio)) return true;
+  return false;
+}
+
 function hasCompletionContentFromChoice(choice: any): boolean {
   if (hasNonEmptyString(choice?.text)) return true;
   if (hasNonEmptyString(choice?.completion)) return true;
@@ -47,11 +78,11 @@ function hasCompletionContentFromChoice(choice: any): boolean {
 
   const message = choice?.message;
   if (hasNonEmptyString(message?.content)) return true;
+  if (hasNonEmptyString(message?.reasoning_content) || hasNonEmptyString(message?.reasoning)) return true;
+  if (isRecord(message?.audio)) return true;
   if (Array.isArray(message?.content)) {
     for (const part of message.content) {
-      if (hasNonEmptyString(part?.text) || hasNonEmptyString(part?.output_text) || hasNonEmptyString(part?.content)) {
-        return true;
-      }
+      if (hasMeaningfulContentPart(part)) return true;
     }
   }
 
@@ -68,6 +99,8 @@ function hasCompletionContentFromChoice(choice: any): boolean {
 
   const delta = choice?.delta;
   if (hasNonEmptyString(delta?.content)) return true;
+  if (hasNonEmptyString(delta?.reasoning_content) || hasNonEmptyString(delta?.reasoning)) return true;
+  if (isRecord(delta?.audio)) return true;
   if (hasNonEmptyString(delta?.refusal)) return true;
   if (hasToolCallLike(delta?.tool_calls)) return true;
   if (hasToolCallLike(delta?.toolCalls)) return true;
@@ -95,17 +128,13 @@ function hasCompletionContentFromPayload(payload: unknown): boolean {
     for (const item of obj.output) {
       if (!isRecord(item)) continue;
       const type = String((item as any).type || '').toLowerCase();
-      if (type.includes('function_call') || type.includes('tool_call')) return true;
+      if (type === 'function_call' || type === 'custom_tool_call' || type === 'tool_call') return true;
 
-      if (hasNonEmptyString((item as any).text) || hasNonEmptyString((item as any).output_text)) return true;
+      if (hasMeaningfulContentPart(item)) return true;
 
       if (Array.isArray((item as any).content)) {
         for (const part of (item as any).content) {
-          if (hasNonEmptyString((part as any)?.text) || hasNonEmptyString((part as any)?.output_text) || hasNonEmptyString((part as any)?.content)) {
-            return true;
-          }
-          const partType = String((part as any)?.type || '').toLowerCase();
-          if (partType.includes('function_call') || partType.includes('tool_call')) return true;
+          if (hasMeaningfulContentPart(part)) return true;
         }
       }
 
@@ -116,16 +145,21 @@ function hasCompletionContentFromPayload(payload: unknown): boolean {
 
   if (Array.isArray(obj?.content)) {
     for (const part of obj.content) {
-      if (hasNonEmptyString((part as any)?.text) || hasNonEmptyString((part as any)?.output_text) || hasNonEmptyString((part as any)?.content)) {
-        return true;
-      }
-      const partType = String((part as any)?.type || '').toLowerCase();
-      if (partType.includes('function_call') || partType.includes('tool_call')) return true;
+      if (hasMeaningfulContentPart(part)) return true;
+    }
+  }
+
+  if (Array.isArray(obj?.candidates)) {
+    for (const candidate of obj.candidates) {
+      if (!isRecord(candidate) || !isRecord(candidate.content)) continue;
+      const parts = Array.isArray(candidate.content.parts) ? candidate.content.parts : [];
+      if (parts.some((part) => hasMeaningfulContentPart(part))) return true;
     }
   }
 
   if (hasNonEmptyString(obj?.delta)) return true;
   if (hasNonEmptyString(obj?.text)) return true;
+  if (hasNonEmptyString(obj?.reasoning_content) || hasNonEmptyString(obj?.reasoning)) return true;
   if (hasToolCallLike(obj?.tool_calls) || hasToolCallLike(obj?.toolCalls)) return true;
   if (hasToolCallLike(obj?.function_call) || hasToolCallLike(obj?.functionCall)) return true;
 
@@ -167,6 +201,72 @@ function detectHasUpstreamOutput(rawText: string): boolean {
   }
 }
 
+function extractFailureMessage(payload: Record<string, unknown>, fallback: string): string {
+  const error = isRecord(payload.error)
+    ? payload.error
+    : (isRecord(payload.response) && isRecord(payload.response.error) ? payload.response.error : null);
+  if (error && hasNonEmptyString(error.message)) return String(error.message).trim();
+  if (hasNonEmptyString(payload.message)) return String(payload.message).trim();
+  return fallback;
+}
+
+function isExplicitFailureFinishReason(value: unknown): boolean {
+  return isExplicitErrorStopReason(value);
+}
+
+function detectExplicitTerminalFailure(payload: unknown): string | null {
+  if (!isRecord(payload)) return null;
+  const type = typeof payload.type === 'string' ? payload.type.trim().toLowerCase() : '';
+  const status = typeof payload.status === 'string' ? payload.status.trim().toLowerCase() : '';
+  const responseStatus = isRecord(payload.response) && typeof payload.response.status === 'string'
+    ? payload.response.status.trim().toLowerCase()
+    : '';
+  if (type === 'error' || type === 'response.failed' || status === 'failed' || responseStatus === 'failed') {
+    return extractFailureMessage(payload, 'Upstream returned a failure terminal');
+  }
+
+  if (Array.isArray(payload.choices)) {
+    for (const choice of payload.choices) {
+      if (!isRecord(choice)) continue;
+      const rawReason = choice.finish_reason;
+      if (isExplicitFailureFinishReason(rawReason)) {
+        return `Upstream returned error finish reason: ${String(choice.finish_reason)}`;
+      }
+    }
+  }
+
+  if (Array.isArray(payload.candidates)) {
+    for (const candidate of payload.candidates) {
+      if (!isRecord(candidate)) continue;
+      const rawReason = candidate.finishReason ?? candidate.finish_reason;
+      if (isExplicitFailureFinishReason(rawReason)) {
+        return `Upstream returned error finish reason: ${String(rawReason)}`;
+      }
+    }
+  }
+
+  return null;
+}
+
+function detectExplicitFailureFromText(rawText: string): string | null {
+  const trimmed = rawText.trim();
+  if (!trimmed) return null;
+  try {
+    return detectExplicitTerminalFailure(JSON.parse(trimmed));
+  } catch {
+    const pulled = pullSseDataEvents(rawText);
+    for (const event of pulled.events) {
+      const data = event.trim();
+      if (!data || data === '[DONE]') continue;
+      try {
+        const failure = detectExplicitTerminalFailure(JSON.parse(data));
+        if (failure) return failure;
+      } catch {}
+    }
+    return null;
+  }
+}
+
 export function detectProxyFailure(input: {
   rawText: string;
   usage?: UsageSummary | null;
@@ -175,6 +275,13 @@ export function detectProxyFailure(input: {
   totalTokens?: number;
 }): FailureResult | null {
   const rawText = typeof input.rawText === 'string' ? input.rawText : '';
+  const explicitFailure = detectExplicitFailureFromText(rawText);
+  if (explicitFailure) {
+    return {
+      status: 502,
+      reason: explicitFailure,
+    };
+  }
   const keywords = normalizeKeywords(config.proxyErrorKeywords || []);
   if (keywords.length > 0) {
     const normalizedText = rawText.toLowerCase();

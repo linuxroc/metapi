@@ -26,7 +26,8 @@ describe('insert helpers', () => {
     await db.delete(schema.sites).run();
   });
 
-  afterAll(() => {
+  afterAll(async () => {
+    await (await import('./index.js')).closeDbConnections();
     delete process.env.DATA_DIR;
     if (dataDir) {
       rmSync(dataDir, { recursive: true, force: true });

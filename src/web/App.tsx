@@ -300,7 +300,13 @@ export function Login({ onLogin, t }: { onLogin: (token: string) => void; t: (te
         body: JSON.stringify(requestBody),
       });
       if (res.ok) {
-        onLogin(normalizedToken);
+        const payload = await res.json() as {
+          sessionToken?: unknown;
+        };
+        const sessionToken = typeof payload.sessionToken === 'string'
+          ? payload.sessionToken.trim()
+          : '';
+        onLogin(sessionToken || normalizedToken);
       } else {
         let reason = '';
         try {
@@ -938,6 +944,7 @@ function AppShell() {
                   {t('个人信息')}
                 </button>
                 <button onClick={() => {
+                  void api.logout().catch(() => {});
                   clearAuthSession(localStorage);
                   setAuthed(false);
                 }} className="user-dropdown-item danger">

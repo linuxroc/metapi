@@ -1,7 +1,7 @@
 import { buildConfig, config } from '../config.js';
 import { db, schema, switchRuntimeDatabase } from '../db/index.js';
 import { upsertSetting } from '../db/upsertSetting.js';
-import { updateBalanceRefreshCron, updateCheckinCron, updateLogCleanupSettings } from './checkinScheduler.js';
+import { updateBalanceRefreshCron, updateCheckinSchedule, updateLogCleanupSettings } from './checkinScheduler.js';
 import { ensureDefaultSitesSeeded } from './defaultSiteSeedService.js';
 import { startProxyLogRetentionService } from './proxyLogRetentionService.js';
 import { invalidateSiteProxyCache } from './siteProxy.js';
@@ -72,7 +72,11 @@ function resetRuntimeConfigToInitialState(preserved: PreservedInfrastructureStat
   config.logCleanupUsageLogsEnabled = config.proxyLogRetentionDays > 0;
   config.logCleanupProgramLogsEnabled = false;
   config.logCleanupRetentionDays = Math.max(1, Math.trunc(config.proxyLogRetentionDays || config.logCleanupRetentionDays || 30));
-  updateCheckinCron(config.checkinCron);
+  updateCheckinSchedule({
+    mode: config.checkinScheduleMode,
+    cronExpr: config.checkinCron,
+    intervalHours: config.checkinIntervalHours,
+  });
   updateBalanceRefreshCron(config.balanceRefreshCron);
   updateLogCleanupSettings({
     cronExpr: config.logCleanupCron,

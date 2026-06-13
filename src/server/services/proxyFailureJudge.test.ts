@@ -79,6 +79,42 @@ describe('detectProxyFailure (empty content)', () => {
     expect(failure).toBeNull();
   });
 
+  it('does not treat reasoning-only or Gemini audio output as empty content', () => {
+    config.proxyEmptyContentFailEnabled = true;
+
+    expect(detectProxyFailure({
+      rawText: JSON.stringify({
+        choices: [{
+          message: {
+            role: 'assistant',
+            content: '',
+            reasoning_content: 'internal plan',
+          },
+          finish_reason: 'stop',
+        }],
+      }),
+      usage: { completionTokens: 0 },
+    })).toBeNull();
+
+    expect(detectProxyFailure({
+      rawText: JSON.stringify({
+        candidates: [{
+          content: {
+            role: 'model',
+            parts: [{
+              inlineData: {
+                mimeType: 'audio/wav',
+                data: 'UklGRg==',
+              },
+            }],
+          },
+          finishReason: 'STOP',
+        }],
+      }),
+      usage: { completionTokens: 0 },
+    })).toBeNull();
+  });
+
   it('flags empty SSE streams that contain no content deltas', () => {
     config.proxyEmptyContentFailEnabled = true;
 
@@ -135,5 +171,73 @@ describe('detectProxyFailure (empty content)', () => {
     });
 
     expect(failure).toMatchObject({ status: 502 });
+  });
+
+  it('flags Responses failure terminals even when empty-content checks are disabled', () => {
+    config.proxyEmptyContentFailEnabled = false;
+
+    expect(detectProxyFailure({
+      rawText: JSON.stringify({
+        type: 'response.failed',
+        response: {
+          status: 'failed',
+          error: { message: 'tool execution failed' },
+        },
+      }),
+    })).toEqual({
+      status: 502,
+      reason: 'tool execution failed',
+    });
+  });
+
+  it('flags Gemini malformed and unexpected tool terminals without substring matching', () => {
+    config.proxyEmptyContentFailEnabled = false;
+
+    for (const finishReason of ['MALFORMED_FUNCTION_CALL', 'UNEXPECTED_TOOL_CALL', 'TOOL_ERROR']) {
+      expect(detectProxyFailure({
+        rawText: JSON.stringify({
+          candidates: [{ finishReason, content: { parts: [] } }],
+        }),
+      })).toEqual({
+        status: 502,
+        reason: `Upstream returned error finish reason: ${finishReason}`,
+      });
+    }
+  });
+
+  it('does not treat Gemini safety or max-token terminals as transport failures', () => {
+    config.proxyEmptyContentFailEnabled = false;
+
+    expect(detectProxyFailure({
+      rawText: JSON.stringify({
+        candidates: [{ finishReason: 'SAFETY', content: { parts: [] } }],
+      }),
+    })).toBeNull();
+    expect(detectProxyFailure({
+      rawText: JSON.stringify({
+        candidates: [{ finishReason: 'MAX_TOKENS', content: { parts: [{ text: 'partial' }] } }],
+      }),
+    })).toBeNull();
+  });
+
+  it('does not fail closed on unknown provider finish reasons', () => {
+    config.proxyEmptyContentFailEnabled = false;
+
+    expect(detectProxyFailure({
+      rawText: JSON.stringify({
+        candidates: [{
+          finishReason: 'NEW_PROVIDER_TERMINAL',
+          content: { parts: [{ text: 'completed output' }] },
+        }],
+      }),
+    })).toBeNull();
+    expect(detectProxyFailure({
+      rawText: JSON.stringify({
+        choices: [{
+          finish_reason: 'provider_completed',
+          message: { content: 'completed output' },
+        }],
+      }),
+    })).toBeNull();
   });
 });

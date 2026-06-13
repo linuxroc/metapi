@@ -56,6 +56,8 @@ export type ProxyConductorDependencies = {
 export type ExecuteInput = {
   requestedModel: string;
   downstreamPolicy?: unknown;
+  maxAttempts?: number;
+  maxSameChannelRetries?: number;
   attempt: (context: ExecuteAttemptContext) => Promise<AttemptResult>;
   onTerminalFailure?: (
     selected: SelectedChannelLike,

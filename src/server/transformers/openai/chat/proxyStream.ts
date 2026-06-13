@@ -90,6 +90,29 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
     };
   };
 
+  const serializeFailureLines = (payload: unknown): string[] => {
+    const message = extractFailureMessage(payload);
+    if (input.downstreamFormat === 'claude') {
+      return [
+        `event: error\ndata: ${JSON.stringify({
+          type: 'error',
+          error: {
+            type: 'api_error',
+            message,
+          },
+        })}\n\n`,
+      ];
+    }
+    return [
+      `data: ${JSON.stringify({
+        error: {
+          message,
+          type: 'upstream_error',
+        },
+      })}\n\n`,
+    ];
+  };
+
   const hasMeaningfulChatAggregateOutput = (): boolean => {
     if (!chatAggregateState) return false;
     for (const choice of chatAggregateState.choices.values()) {
@@ -195,6 +218,10 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
       return;
     }
 
+    if (terminalResult.status === 'failed') {
+      return;
+    }
+
     if (input.downstreamFormat === 'openai' && !forwardedDownstreamOutput) {
       forwardedDownstreamOutput = true;
       flushPendingWrites();
@@ -209,7 +236,6 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
 
     if (
       input.downstreamFormat === 'openai'
-      && terminalResult.status !== 'failed'
       && chatAggregateState
       && chatAggregateState.choices.size > 0
     ) {
@@ -277,6 +303,14 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
             // protocol-level sticky bind will fall back to the raw payload
             // path in `bindSurfaceStickyChannelFromResponse`.
           }
+          const payloadType = typeof (parsedPayload as Record<string, unknown>).type === 'string'
+            ? String((parsedPayload as Record<string, unknown>).type)
+            : '';
+          if (payloadType === 'error' || payloadType === 'response.failed') {
+            markFailed(parsedPayload);
+            input.writeLines(consumed.lines);
+            return true;
+          }
         }
         input.writeLines(consumed.lines);
         return consumed.done;
@@ -299,8 +333,15 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
       const isFailurePayload = payloadType === 'response.failed' || payloadType === 'error';
       if (isFailurePayload) {
         markFailed(parsedPayload);
+        emitLines(serializeFailureLines(parsedPayload), { force: true });
+        return true;
       }
       const normalizedEvent = downstreamTransformer.transformStreamEvent(parsedPayload, streamContext, input.modelName);
+      if (normalizedEvent.finishReason === 'error') {
+        markFailed(parsedPayload, 'Upstream returned an error finish reason');
+        emitLines(serializeFailureLines(parsedPayload), { force: true });
+        return true;
+      }
       // The aggregator is now always-on so that protocol-level sticky
       // (P1 fix) can read tool_call.id snapshots from the terminal
       // NormalizedFinalResponse regardless of downstream format. The
@@ -314,7 +355,7 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
         downstreamTransformer.serializeStreamEvent(normalizedEvent, streamContext, claudeContext),
         {
           meaningful: hasMeaningfulChatAggregateOutput(),
-          force: isFailurePayload,
+          force: false,
         },
       );
       return input.downstreamFormat === 'claude' && claudeContext.doneSent;
@@ -372,10 +413,15 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
           : '';
         if (payloadType === 'response.failed' || payloadType === 'error') {
           markFailed(payload);
+          return terminalResult;
         }
       }
       if (input.downstreamFormat === 'openai') {
         const normalizedFinal = normalizeOpenAiChatFinalToNormalized(payload, input.modelName, fallbackText);
+        if (normalizedFinal.finishReason === 'error') {
+          markFailed(payload, 'Upstream returned an error finish reason');
+          return terminalResult;
+        }
         terminalNormalizedFinal = normalizedFinal;
         streamContext.id = normalizedFinal.id;
         streamContext.model = normalizedFinal.model;
@@ -392,6 +438,10 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
         // bind will simply fall back to the raw payload path in extractor.
         try {
           terminalNormalizedFinal = normalizeOpenAiChatFinalToNormalized(payload, input.modelName, fallbackText);
+          if (terminalNormalizedFinal.finishReason === 'error') {
+            markFailed(payload, 'Upstream returned an error finish reason');
+            return terminalResult;
+          }
         } catch {
           // Defensive: never let normalization errors block the user-facing
           // stream serialization that immediately follows.

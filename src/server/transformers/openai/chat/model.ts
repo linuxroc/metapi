@@ -43,6 +43,7 @@ export type OpenAiChatToolCall = {
   id: string;
   name: string;
   arguments: string;
+  thoughtSignature?: string;
 };
 
 export type OpenAiChatChoice = {
@@ -50,6 +51,7 @@ export type OpenAiChatChoice = {
   role?: 'assistant';
   content: string;
   reasoningContent: string;
+  reasoningSignature?: string;
   toolCalls: OpenAiChatToolCall[];
   finishReason: string;
   annotations?: Array<Record<string, unknown>>;
@@ -69,11 +71,13 @@ export type OpenAiChatChoiceDelta = {
   role?: 'assistant';
   contentDelta?: string;
   reasoningDelta?: string;
+  reasoningSignature?: string;
   toolCallDeltas?: Array<{
     index: number;
     id?: string;
     name?: string;
     argumentsDelta?: string;
+    thoughtSignature?: string;
   }>;
   finishReason?: string | null;
   annotations?: Array<Record<string, unknown>>;

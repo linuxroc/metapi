@@ -64,6 +64,27 @@ describe('proxyChannelCoordinator', () => {
     expect(proxyChannelCoordinator.getStickyChannelId(key)).toBeNull();
   });
 
+  it('keeps delimiter-bearing model and session fields collision-free', () => {
+    const first = proxyChannelCoordinator.buildStickySessionKey({
+      clientKind: 'codex',
+      sessionId: 'session',
+      requestedModel: 'model|session',
+      downstreamPath: '/v1/responses',
+      downstreamApiKeyId: 9,
+    });
+    const second = proxyChannelCoordinator.buildStickySessionKey({
+      clientKind: 'codex',
+      sessionId: 'session|session',
+      requestedModel: 'model',
+      downstreamPath: '/v1/responses',
+      downstreamApiKeyId: 9,
+    });
+
+    expect(first).not.toBe(second);
+    expect(first).toContain('model%7Csession');
+    expect(second).toContain('session%7Csession');
+  });
+
   it('treats structured oauth providers as session-scoped even when extraConfig omits oauth.provider', () => {
     const key = proxyChannelCoordinator.buildStickySessionKey({
       clientKind: 'codex',

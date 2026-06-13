@@ -118,3 +118,14 @@ describe('extractOpenAiResponsesSessionId', () => {
     }
   });
 });
+
+describe('OpenAI Responses session identifier bounds', () => {
+  it('rejects oversized and control-character continuation ids', () => {
+    expect(extractOpenAiResponsesSessionId({
+      previous_response_id: `resp_${'x'.repeat(300)}`,
+    })).toBeNull();
+    expect(extractOpenAiResponsesSessionId({
+      previous_response_id: 'resp_ok\nspoofed',
+    })).toBeNull();
+  });
+});

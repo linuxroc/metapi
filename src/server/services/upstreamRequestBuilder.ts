@@ -4,17 +4,19 @@ import { config } from '../config.js';
 import { applyPayloadRules } from './payloadRules.js';
 import type { DownstreamFormat } from '../transformers/shared/normalized.js';
 import {
-  convertOpenAiBodyToResponsesBody as convertOpenAiBodyToResponsesBodyViaTransformer,
   sanitizeResponsesBodyForProxy as sanitizeResponsesBodyForProxyViaTransformer,
 } from '../transformers/openai/responses/conversion.js';
+import { buildCanonicalRequestToOpenAiResponsesBody } from '../transformers/openai/responses/requestBridge.js';
 import { normalizeCodexResponsesBodyForProxy } from '../transformers/openai/responses/codexCompatibility.js';
 import {
-  convertOpenAiBodyToAnthropicMessagesBody,
   sanitizeAnthropicMessagesBody,
 } from '../transformers/anthropic/messages/conversion.js';
+import { buildCanonicalRequestToAnthropicMessagesBody } from '../transformers/anthropic/messages/requestBridge.js';
+import { buildCanonicalRequestToGeminiGenerateContentBody } from '../transformers/gemini/generate-content/requestBridge.js';
 import {
-  buildGeminiGenerateContentRequestFromOpenAi,
-} from '../transformers/gemini/generate-content/requestBridge.js';
+  canonicalRequestFromOpenAiBody,
+  canonicalRequestToOpenAiChatBody,
+} from '../transformers/canonical/openAiRequestBridge.js';
 import {
   buildClaudeRuntimeHeaders,
   getInputHeader,
@@ -22,7 +24,7 @@ import {
 } from '../proxy-core/providers/headerUtils.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object';
+  return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
 function asTrimmedString(value: unknown): string {
@@ -286,106 +288,6 @@ function ensureResponsesAcceptHeader(
   return headers;
 }
 
-function normalizeResponsesFallbackChatFunctionTool(rawTool: unknown): Record<string, unknown> | null {
-  if (!isRecord(rawTool)) return null;
-  if (asTrimmedString(rawTool.type).toLowerCase() !== 'function') return null;
-
-  if (isRecord(rawTool.function)) {
-    const name = asTrimmedString(rawTool.function.name);
-    if (!name) return null;
-    return {
-      ...rawTool,
-      type: 'function',
-      function: {
-        ...rawTool.function,
-        name,
-      },
-    };
-  }
-
-  const name = asTrimmedString(rawTool.name);
-  if (!name) return null;
-
-  const fn: Record<string, unknown> = { name };
-  const description = asTrimmedString(rawTool.description);
-  if (description) fn.description = description;
-  if (rawTool.parameters !== undefined) fn.parameters = rawTool.parameters;
-  if (rawTool.strict !== undefined) fn.strict = rawTool.strict;
-
-  return {
-    type: 'function',
-    function: fn,
-  };
-}
-
-function normalizeResponsesFallbackChatToolChoice(
-  rawToolChoice: unknown,
-  allowedToolNames: Set<string>,
-): unknown {
-  if (rawToolChoice === undefined) return undefined;
-
-  if (typeof rawToolChoice === 'string') {
-    const normalized = rawToolChoice.trim().toLowerCase();
-    if (normalized === 'none') return 'none';
-    if (allowedToolNames.size <= 0) return undefined;
-    if (normalized === 'auto' || normalized === 'required') return normalized;
-    return undefined;
-  }
-
-  if (!isRecord(rawToolChoice)) return undefined;
-  if (asTrimmedString(rawToolChoice.type).toLowerCase() !== 'function') return undefined;
-
-  const nestedFunction = isRecord(rawToolChoice.function) ? rawToolChoice.function : null;
-  const name = asTrimmedString(nestedFunction?.name ?? rawToolChoice.name);
-  if (!name || !allowedToolNames.has(name)) return undefined;
-
-  return {
-    type: 'function',
-    function: {
-      ...(nestedFunction || {}),
-      name,
-    },
-  };
-}
-
-function sanitizeResponsesFallbackChatBody(
-  body: Record<string, unknown>,
-): Record<string, unknown> {
-  const next: Record<string, unknown> = { ...body };
-  const normalizedTools = Array.isArray(body.tools)
-    ? body.tools
-      .map((tool) => normalizeResponsesFallbackChatFunctionTool(tool))
-      .filter((tool): tool is Record<string, unknown> => !!tool)
-    : [];
-
-  if (normalizedTools.length > 0) {
-    next.tools = normalizedTools;
-  } else {
-    delete next.tools;
-  }
-
-  const allowedToolNames = new Set(
-    normalizedTools
-      .map((tool) => (
-        isRecord(tool.function)
-          ? asTrimmedString(tool.function.name)
-          : ''
-      ))
-      .filter((name) => name.length > 0),
-  );
-  const normalizedToolChoice = normalizeResponsesFallbackChatToolChoice(
-    body.tool_choice,
-    allowedToolNames,
-  );
-  if (normalizedToolChoice !== undefined) {
-    next.tool_choice = normalizedToolChoice;
-  } else {
-    delete next.tool_choice;
-  }
-
-  return next;
-}
-
 function toFiniteNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
@@ -515,6 +417,16 @@ export function buildUpstreamEndpointRequest(input: {
   };
 
   const openaiBody = stripGeminiUnsupportedFields(input.openaiBody);
+  const canonicalCompatibilityRequest = canonicalRequestFromOpenAiBody({
+    body: {
+      ...openaiBody,
+      model: input.modelName,
+      stream: input.stream,
+    },
+    surface: input.downstreamFormat === 'claude'
+      ? 'anthropic-messages'
+      : (input.downstreamFormat === 'responses' ? 'openai-responses' : 'openai-chat'),
+  });
   const runtime = {
     executor: (
       sitePlatform === 'codex'
@@ -543,17 +455,9 @@ export function buildUpstreamEndpointRequest(input: {
   );
 
   if (isInternalGeminiUpstream) {
-    const instructions = (
-      input.downstreamFormat === 'responses'
-      && typeof input.responsesOriginalBody?.instructions === 'string'
-    )
-      ? input.responsesOriginalBody.instructions
-      : undefined;
-    const geminiRequest = buildGeminiGenerateContentRequestFromOpenAi({
-      body: openaiBody,
-      modelName: input.modelName,
-      instructions,
-    });
+    const geminiRequest = buildCanonicalRequestToGeminiGenerateContentBody(
+      canonicalCompatibilityRequest,
+    );
     const configuredGeminiRequest = applyConfiguredPayloadRules(geminiRequest);
     if (!providerProfile) {
       throw new Error(`missing provider profile for platform: ${sitePlatform}`);
@@ -606,7 +510,9 @@ export function buildUpstreamEndpointRequest(input: {
     const sanitizedBody = nativeClaudeBody
       ?? normalizedClaudeBody
       ?? sanitizeAnthropicMessagesBody(
-        convertOpenAiBodyToAnthropicMessagesBody(openaiBody, input.modelName, input.stream),
+        buildCanonicalRequestToAnthropicMessagesBody(canonicalCompatibilityRequest, {
+          defaultMaxTokens: config.anthropicDefaultMaxTokens,
+        }),
       );
     const configuredClaudeBody = applyConfiguredPayloadRules(sanitizedBody);
 
@@ -652,14 +558,14 @@ export function buildUpstreamEndpointRequest(input: {
     const responsesHeaders = input.downstreamFormat === 'responses'
       ? extractResponsesPassthroughHeaders(input.downstreamHeaders)
       : {};
-    const rawBody = (
+    const rawBody = stripGeminiUnsupportedFields(
       input.downstreamFormat === 'responses' && input.responsesOriginalBody
         ? {
           ...stripGeminiUnsupportedFields(input.responsesOriginalBody),
           model: input.modelName,
           stream: input.stream,
         }
-        : convertOpenAiBodyToResponsesBodyViaTransformer(openaiBody, input.modelName, input.stream)
+        : buildCanonicalRequestToOpenAiResponsesBody(canonicalCompatibilityRequest)
     );
     const sanitizedResponsesBody = sanitizeResponsesBodyForProxyViaTransformer(rawBody, input.modelName, input.stream);
     if (preserveWebsocketIncrementalMode && rawBody.generate === false) {
@@ -717,16 +623,14 @@ export function buildUpstreamEndpointRequest(input: {
   }
 
   const headers = ensureStreamAcceptHeader(commonHeaders, input.stream);
-  const chatBody = {
-    ...openaiBody,
-    model: input.modelName,
-    stream: input.stream,
-  };
-  const configuredChatBody = applyConfiguredPayloadRules(
-    input.downstreamFormat === 'responses'
-      ? sanitizeResponsesFallbackChatBody(chatBody)
-      : chatBody,
-  );
+  const chatBody = input.downstreamFormat === 'openai'
+    ? {
+      ...openaiBody,
+      model: input.modelName,
+      stream: input.stream,
+    }
+    : canonicalRequestToOpenAiChatBody(canonicalCompatibilityRequest);
+  const configuredChatBody = applyConfiguredPayloadRules(chatBody);
   return {
     path: resolveEndpointPath('chat'),
     headers,

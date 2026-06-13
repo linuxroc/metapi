@@ -217,7 +217,7 @@ function shouldBlockEndpointByError(
   errorText?: string | null,
 ): boolean {
   if (isEndpointDispatchDeniedError(status, errorText)) return true;
-  if (status === 404 || status === 405 || status === 415 || status === 501) return true;
+  if (status === 405 || status === 415 || status === 501) return true;
   if (isUnsupportedMediaTypeError(status, errorText)) return true;
 
   const rawText = errorText || '';

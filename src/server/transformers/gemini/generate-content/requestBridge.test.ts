@@ -66,7 +66,7 @@ describe('gemini generate-content request bridge', () => {
           functionDeclarations: [
             {
               name: 'lookup',
-              parameters: { type: 'object' },
+              parametersJsonSchema: { type: 'object' },
             },
           ],
         },
@@ -79,9 +79,112 @@ describe('gemini generate-content request bridge', () => {
       generationConfig: {
         thinkingConfig: {
           thinkingBudget: 512,
+          includeThoughts: true,
         },
       },
     });
+  });
+
+  it('maps canonical and standard OpenAI audio input to Gemini inlineData', () => {
+    const canonicalBody = buildCanonicalRequestToGeminiGenerateContentBody({
+      operation: 'generate',
+      surface: 'openai-chat',
+      cliProfile: 'generic',
+      requestedModel: 'gemini-2.5-pro',
+      stream: false,
+      messages: [{
+        role: 'user',
+        parts: [{
+          type: 'audio',
+          data: 'UklGRg==',
+          format: 'wav',
+          mimeType: 'audio/wav',
+        }],
+      }],
+    });
+    const compatibilityBody = buildGeminiGenerateContentRequestFromOpenAi({
+      body: {
+        messages: [{
+          role: 'user',
+          content: [{
+            type: 'input_audio',
+            input_audio: {
+              data: 'SUQzBA==',
+              format: 'mp3',
+            },
+          }],
+        }],
+      },
+      modelName: 'gemini-2.5-pro',
+    });
+
+    expect(canonicalBody).toMatchObject({
+      contents: [{
+        role: 'user',
+        parts: [{
+          inlineData: {
+            mimeType: 'audio/wav',
+            data: 'UklGRg==',
+          },
+        }],
+      }],
+    });
+    expect(compatibilityBody).toMatchObject({
+      contents: [{
+        role: 'user',
+        parts: [{
+          inlineData: {
+            mime_type: 'audio/mpeg',
+            data: 'SUQzBA==',
+          },
+        }],
+      }],
+    });
+  });
+
+  it('uses Gemini 3 thinking levels and preserves full JSON Schema tool declarations', () => {
+    const body = buildCanonicalRequestToGeminiGenerateContentBody({
+      operation: 'generate',
+      surface: 'openai-chat',
+      cliProfile: 'generic',
+      requestedModel: 'gemini-3-pro-preview',
+      stream: false,
+      messages: [{ role: 'user', parts: [{ type: 'text', text: 'lookup' }] }],
+      reasoning: {
+        budgetTokens: 8192,
+      },
+      tools: [{
+        name: 'lookup',
+        inputSchema: {
+          type: 'object',
+          oneOf: [{ required: ['query'] }],
+          properties: {
+            query: { type: 'string' },
+          },
+          additionalProperties: false,
+        },
+      }],
+    });
+
+    expect(body.generationConfig).toMatchObject({
+      thinkingConfig: {
+        thinkingLevel: 'medium',
+        includeThoughts: true,
+      },
+    });
+    expect(body.tools).toEqual([{
+      functionDeclarations: [{
+        name: 'lookup',
+        parametersJsonSchema: {
+          type: 'object',
+          oneOf: [{ required: ['query'] }],
+          properties: {
+            query: { type: 'string' },
+          },
+          additionalProperties: false,
+        },
+      }],
+    }]);
   });
 
   it('injects provider thought signatures into functionCall parts', () => {
@@ -306,10 +409,9 @@ describe('gemini generate-content request bridge', () => {
         role: 'user',
         parts: [{
           functionResponse: {
+            id: 'call_weather',
             name: 'lookup_weather',
-            response: {
-              result: { temperature: '22C' },
-            },
+            response: { temperature: '22C' },
           },
         }],
       },
@@ -349,6 +451,62 @@ describe('OpenAI -> Gemini image content forwarding', () => {
       { fileData: { fileUri: 'https://example.com/bird.png' } },
       { inlineData: { mime_type: 'image/png', data: 'iVBORw0KGgo=' } },
       { fileData: { fileUri: 'https://example.com/fish.png' } },
+    ]);
+  });
+});
+
+describe('Gemini -> canonical request fidelity', () => {
+  it('preserves responseJsonSchema and tool-call thought signatures', () => {
+    const result = parseGeminiGenerateContentRequestToCanonical({
+      model: 'gemini-2.5-pro',
+      contents: [
+        {
+          role: 'model',
+          parts: [{
+            functionCall: {
+              id: 'call_weather',
+              name: 'lookup_weather',
+              args: { city: 'Paris' },
+            },
+            thoughtSignature: 'sig_weather',
+          }],
+        },
+      ],
+      generationConfig: {
+        responseMimeType: 'application/json',
+        responseJsonSchema: {
+          type: 'object',
+          properties: {
+            temperature: { type: 'number' },
+          },
+        },
+      },
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.value?.generation?.responseFormat).toEqual({
+      type: 'json_schema',
+      json_schema: {
+        name: 'gemini_response',
+        schema: {
+          type: 'object',
+          properties: {
+            temperature: { type: 'number' },
+          },
+        },
+      },
+    });
+    expect(result.value?.messages).toEqual([
+      {
+        role: 'assistant',
+        parts: [{
+          type: 'tool_call',
+          id: 'call_weather',
+          name: 'lookup_weather',
+          argumentsJson: '{"city":"Paris"}',
+          thoughtSignature: 'sig_weather',
+        }],
+      },
     ]);
   });
 });

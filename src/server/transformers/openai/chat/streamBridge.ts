@@ -13,7 +13,12 @@ import type { OpenAiChatNormalizedStreamEvent } from './model.js';
 
 const multiChoiceToolCallState = new WeakMap<
   StreamTransformContext,
-  Record<string, { id?: string; name?: string; arguments?: string }>
+  Record<string, {
+    id?: string;
+    name?: string;
+    arguments?: string;
+    thoughtSignature?: string;
+  }>
 >();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -22,10 +27,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function getMultiChoiceToolState(
   context: StreamTransformContext,
-): Record<string, { id?: string; name?: string; arguments?: string }> {
+): Record<string, {
+  id?: string;
+  name?: string;
+  arguments?: string;
+  thoughtSignature?: string;
+}> {
   const existing = multiChoiceToolCallState.get(context);
   if (existing) return existing;
-  const created: Record<string, { id?: string; name?: string; arguments?: string }> = {};
+  const created: Record<string, {
+    id?: string;
+    name?: string;
+    arguments?: string;
+    thoughtSignature?: string;
+  }> = {};
   multiChoiceToolCallState.set(context, created);
   return created;
 }
@@ -61,6 +76,7 @@ export const openAiChatStream = {
           role: normalized.role !== undefined ? normalized.role : choiceEvent.role,
           contentDelta: normalized.contentDelta,
           reasoningDelta: normalized.reasoningDelta,
+          reasoningSignature: normalized.reasoningSignature,
           toolCallDeltas: normalized.toolCallDeltas !== undefined
             ? normalized.toolCallDeltas
             : choiceEvent.toolCallDeltas,
@@ -115,6 +131,7 @@ export const openAiChatStream = {
             if (choiceEvent.role) delta.role = choiceEvent.role;
             if (choiceEvent.contentDelta !== undefined) delta.content = choiceEvent.contentDelta;
             if (choiceEvent.reasoningDelta) delta.reasoning_content = choiceEvent.reasoningDelta;
+            if (choiceEvent.reasoningSignature) delta.reasoning_signature = choiceEvent.reasoningSignature;
             if (Array.isArray(choiceEvent.toolCallDeltas) && choiceEvent.toolCallDeltas.length > 0) {
               const toolState = getMultiChoiceToolState(context);
               delta.tool_calls = choiceEvent.toolCallDeltas.map((toolCall) => {
@@ -125,6 +142,9 @@ export const openAiChatStream = {
                   ...(toolCall.id || existing.id ? { id: toolCall.id || existing.id } : {}),
                   ...(toolCall.name || existing.name ? { name: toolCall.name || existing.name } : {}),
                   arguments: `${existing.arguments || ''}${toolCall.argumentsDelta ?? ''}`,
+                  ...(toolCall.thoughtSignature || existing.thoughtSignature
+                    ? { thoughtSignature: toolCall.thoughtSignature || existing.thoughtSignature }
+                    : {}),
                 };
 
                 const functionPayload: Record<string, unknown> = {};
@@ -136,6 +156,13 @@ export const openAiChatStream = {
                   ...(toolCall.id ? { id: toolCall.id } : {}),
                   ...(toolCall.id || toolCall.name ? { type: 'function' } : {}),
                   ...(Object.keys(functionPayload).length > 0 ? { function: functionPayload } : {}),
+                  ...(toolCall.thoughtSignature
+                    ? {
+                      provider_specific_fields: {
+                        thought_signature: toolCall.thoughtSignature,
+                      },
+                    }
+                    : {}),
                 };
               });
             }

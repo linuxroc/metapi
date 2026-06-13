@@ -1,4 +1,6 @@
 import { canonicalRequestFromOpenAiBody, canonicalRequestToOpenAiChatBody } from '../../canonical/openAiRequestBridge.js';
+import { readOpenAiCompatibleContinuation } from '../../canonical/continuationBridge.js';
+import { normalizeCanonicalReasoningRequest } from '../../canonical/reasoning.js';
 import type { CanonicalRequestEnvelope } from '../../canonical/types.js';
 import type { ProtocolParseContext } from '../../contracts.js';
 import {
@@ -49,24 +51,85 @@ export function parseOpenAiResponsesRequestToCanonical(
     responsesBody.stream === true,
     { defaultEncryptedReasoningInclude: ctx?.defaultEncryptedReasoningInclude },
   );
+  const continuation = readOpenAiCompatibleContinuation(responsesBody, ctx?.continuation);
+  const canonical = canonicalRequestFromOpenAiBody({
+    body: openAiBody,
+    surface: 'openai-responses',
+    cliProfile: ctx?.cliProfile,
+    operation: ctx?.operation,
+    metadata: ctx?.metadata,
+    passthrough: ctx?.passthrough,
+    continuation,
+  });
+  const responsesToolContract = canonicalRequestFromOpenAiBody({
+    body: {
+      model: canonical.requestedModel,
+      messages: [],
+      tools: responsesBody.tools,
+      tool_choice: responsesBody.tool_choice,
+      parallel_tool_calls: responsesBody.parallel_tool_calls,
+    },
+    surface: 'openai-responses',
+  });
+  const responsesGenerationContract = canonicalRequestFromOpenAiBody({
+    body: {
+      ...responsesBody,
+      model: canonical.requestedModel,
+      messages: [],
+    },
+    surface: 'openai-responses',
+  });
+  const reasoningResult = normalizeCanonicalReasoningRequest({
+    include: responsesBody.include,
+    reasoning: responsesBody.reasoning,
+    reasoning_effort: responsesBody.reasoning_effort,
+    reasoning_budget: responsesBody.reasoning_budget,
+    reasoning_summary: responsesBody.reasoning_summary,
+  });
+  const transformerMetadata = {
+    ...(typeof canonical.passthrough?.transformerMetadata === 'object'
+      ? canonical.passthrough.transformerMetadata as Record<string, unknown>
+      : {}),
+    ...(reasoningResult.metadata ?? {}),
+  };
 
   return {
-    value: canonicalRequestFromOpenAiBody({
-      body: openAiBody,
-      surface: 'openai-responses',
-      cliProfile: ctx?.cliProfile,
-      operation: ctx?.operation,
-      metadata: ctx?.metadata,
-      passthrough: ctx?.passthrough,
-      continuation: ctx?.continuation,
-    }),
+    value: {
+      ...canonical,
+      ...(reasoningResult.reasoning ? { reasoning: reasoningResult.reasoning } : {}),
+      ...(responsesGenerationContract.generation
+        ? {
+          generation: {
+            ...(canonical.generation ?? {}),
+            ...responsesGenerationContract.generation,
+          },
+        }
+        : {}),
+      ...(responsesToolContract.tools ? { tools: responsesToolContract.tools } : {}),
+      ...(responsesToolContract.toolChoice !== undefined
+        ? { toolChoice: responsesToolContract.toolChoice }
+        : {}),
+      ...(typeof responsesToolContract.parallelToolCalls === 'boolean'
+        ? { parallelToolCalls: responsesToolContract.parallelToolCalls }
+        : {}),
+      ...(Object.keys(transformerMetadata).length > 0
+        ? {
+          passthrough: {
+            ...(canonical.passthrough ?? {}),
+            transformerMetadata,
+          },
+        }
+        : {}),
+    },
   };
 }
 
 export function buildCanonicalRequestToOpenAiResponsesBody(
   request: CanonicalRequestEnvelope,
 ): Record<string, unknown> {
-  const openAiBody = canonicalRequestToOpenAiChatBody(request);
+  const openAiBody = canonicalRequestToOpenAiChatBody(request, {
+    preserveResponsesExtensions: true,
+  });
   if (request.reasoning) {
     openAiBody.reasoning = {
       ...(request.reasoning.effort ? { effort: request.reasoning.effort } : {}),
@@ -76,12 +139,14 @@ export function buildCanonicalRequestToOpenAiResponsesBody(
   }
   const body = convertOpenAiBodyToResponsesBody(openAiBody, request.requestedModel, request.stream);
   const mergedInclude = Array.from(new Set([
-    'reasoning.encrypted_content',
+    ...(request.cliProfile === 'codex' || request.reasoning?.includeEncryptedContent
+      ? ['reasoning.encrypted_content']
+      : []),
     ...normalizeIncludeList(body.include),
   ]));
   return {
     ...body,
-    include: mergedInclude,
+    ...(mergedInclude.length > 0 ? { include: mergedInclude } : {}),
     store: false,
   };
 }

@@ -7,6 +7,7 @@ import { checkinAccount, checkinAll } from '../../services/checkinService.js';
 import { updateCheckinSchedule } from '../../services/checkinScheduler.js';
 import { startBackgroundTask, summarizeCheckinResults } from '../../services/backgroundTaskService.js';
 import { classifyFailureReason } from '../../services/failureReasonService.js';
+import { isCheckinScheduleMode, type CheckinScheduleMode } from '../../shared/checkinSchedule.js';
 
 function buildCheckinAccountLabel(item: any): string {
   const username = item?.username || (item?.accountId ? `#${item.accountId}` : 'unknown');
@@ -143,10 +144,10 @@ export async function checkinRoutes(app: FastifyInstance) {
   });
 
   // Update check-in schedule
-  app.put<{ Body: { mode?: 'cron' | 'interval'; cron?: string; intervalHours?: number } }>('/api/checkin/schedule', async (request) => {
+  app.put<{ Body: { mode?: CheckinScheduleMode; cron?: string; intervalHours?: number } }>('/api/checkin/schedule', async (request) => {
     try {
       const body = request.body || {};
-      const nextMode: 'cron' | 'interval' = body.mode === 'interval' ? 'interval' : 'cron';
+      const nextMode: CheckinScheduleMode = isCheckinScheduleMode(body.mode) ? body.mode : 'cron';
       const nextCron = typeof body.cron === 'string' ? body.cron : undefined;
       const nextIntervalHours = body.intervalHours !== undefined ? Number(body.intervalHours) : undefined;
       const normalizedIntervalHours = typeof nextIntervalHours === 'number' && Number.isFinite(nextIntervalHours)

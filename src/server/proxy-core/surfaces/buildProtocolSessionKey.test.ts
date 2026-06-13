@@ -284,18 +284,9 @@ describe('buildProtocolSessionKey', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Robustness: unusual but non-malicious inputs MUST NOT throw.
-  //
-  // This row indirectly covers Requirement 1.5 / Property 9 — the
-  // `buildSurfaceStickySessionKey` `try/catch` is a defensive guardrail
-  // around this helper. Because both functions live in the same module,
-  // injecting a runtime throw from `buildProtocolSessionKey` via `vi.spyOn`
-  // is not feasible (same-module references resolve to the original symbol,
-  // not the export site). Instead, we pin the contract that
-  // `buildProtocolSessionKey` does not throw on any documented input shape,
-  // which makes the catch in `buildSurfaceStickySessionKey` provably dead
-  // code at the unit level while still preserving it as a runtime safety
-  // net.
+  // Robustness: unusual key ids remain supported, while unsafe continuation
+  // identifiers are rejected before they can create unbounded or ambiguous
+  // sticky-map keys. Surface callers own the non-fatal fallback behavior.
   // ---------------------------------------------------------------------------
   it.each<{ description: string; input: ProtocolSessionKeyInput }>([
     {
@@ -318,30 +309,50 @@ describe('buildProtocolSessionKey', () => {
         continuationId: 'resp_neginf',
       },
     },
-    {
-      description: 'continuationId containing a NUL byte',
-      input: {
-        downstreamApiKeyId: 1,
-        downstreamPath: '/v1/responses',
-        requestedModel: 'gpt-5',
-        protocolId: 'openai/responses',
-        continuationId: '\u0000resp_nul\u0000',
-      },
-    },
-    {
-      description: 'very long continuationId',
-      input: {
-        downstreamApiKeyId: 1,
-        downstreamPath: '/v1/responses',
-        requestedModel: 'gpt-5',
-        protocolId: 'anthropic/messages',
-        continuationId: 'a'.repeat(8192),
-      },
-    },
   ])('does not throw on $description', ({ input }) => {
     expect(() => buildProtocolSessionKey(input)).not.toThrow();
     const result = buildProtocolSessionKey(input);
     expect(typeof result).toBe('string');
     expect(result.startsWith('proto-v1|')).toBe(true);
+  });
+
+  it.each<{ description: string; continuationId: string }>([
+    {
+      description: 'a NUL byte',
+      continuationId: '\u0000resp_nul\u0000',
+    },
+    {
+      description: 'an overlong value',
+      continuationId: 'a'.repeat(8192),
+    },
+  ])('rejects continuationId containing $description', ({ continuationId }) => {
+    expect(() => buildProtocolSessionKey({
+      downstreamApiKeyId: 1,
+      downstreamPath: '/v1/responses',
+      requestedModel: 'gpt-5',
+      protocolId: 'openai/responses',
+      continuationId,
+    })).toThrow('Invalid protocol continuation identifier');
+  });
+
+  it('keeps delimiter-bearing model and continuation fields collision-free', () => {
+    const first = buildProtocolSessionKey({
+      downstreamApiKeyId: 1,
+      downstreamPath: '/v1/responses',
+      requestedModel: 'model|openai/responses',
+      protocolId: 'openai/responses',
+      continuationId: 'resp',
+    });
+    const second = buildProtocolSessionKey({
+      downstreamApiKeyId: 1,
+      downstreamPath: '/v1/responses',
+      requestedModel: 'model',
+      protocolId: 'openai/responses',
+      continuationId: 'openai/responses|resp',
+    });
+
+    expect(first).not.toBe(second);
+    expect(first).toContain('model%7Copenai/responses');
+    expect(second).toContain('openai/responses%7Cresp');
   });
 });

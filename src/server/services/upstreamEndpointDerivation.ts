@@ -2,6 +2,9 @@ import {
   rankConversationFileEndpoints,
   type ConversationFileInputSummary,
 } from '../proxy-core/capabilities/conversationFileCapabilities.js';
+import {
+  resolveUpstreamEndpointCapability,
+} from '../proxy-core/capabilities/upstreamEndpointCapabilities.js';
 import type { UpstreamEndpoint } from '../proxy-core/orchestration/upstreamRequest.js';
 import { fetchModelPricingCatalog } from './modelPricingService.js';
 import {
@@ -39,102 +42,87 @@ function normalizePlatformName(platform: unknown): string {
   return asTrimmedString(platform).toLowerCase();
 }
 
-function normalizeEndpointTypes(value: unknown): UpstreamEndpoint[] {
+type NormalizedEndpointType = {
+  concrete: boolean;
+  endpoints: UpstreamEndpoint[];
+};
+
+const ENDPOINT_TYPE_ALIASES: Record<string, NormalizedEndpointType> = {
+  anthropic: { concrete: false, endpoints: ['messages'] },
+  chat: { concrete: true, endpoints: ['chat'] },
+  chat_completions: { concrete: true, endpoints: ['chat'] },
+  claude: { concrete: false, endpoints: ['messages'] },
+  completions: { concrete: true, endpoints: ['chat'] },
+  messages: { concrete: true, endpoints: ['messages'] },
+  openai: { concrete: false, endpoints: ['chat', 'responses'] },
+  openai_chat: { concrete: true, endpoints: ['chat'] },
+  openai_responses: { concrete: true, endpoints: ['responses'] },
+  responses: { concrete: true, endpoints: ['responses'] },
+};
+
+const ENDPOINT_PATH_ALIASES: Record<string, UpstreamEndpoint> = {
+  '/chat/completions': 'chat',
+  '/messages': 'messages',
+  '/responses': 'responses',
+  '/v1/chat/completions': 'chat',
+  '/v1/messages': 'messages',
+  '/v1/responses': 'responses',
+  'chat/completions': 'chat',
+  'v1/chat/completions': 'chat',
+  'v1/messages': 'messages',
+  'v1/responses': 'responses',
+};
+
+function normalizeEndpointPath(value: string): string {
+  let path = value;
+  try {
+    path = new URL(value).pathname;
+  } catch {
+    path = value.split(/[?#]/, 1)[0] || '';
+  }
+  const normalized = path.trim().toLowerCase().replace(/\/+$/, '');
+  return normalized || '/';
+}
+
+function normalizeEndpointType(value: unknown): NormalizedEndpointType {
   const raw = asTrimmedString(value).toLowerCase();
-  if (!raw) return [];
+  if (!raw) return { concrete: false, endpoints: [] };
 
-  const normalized = new Set<UpstreamEndpoint>();
-
-  if (
-    raw.includes('/v1/messages')
-    || raw === 'messages'
-    || raw.includes('anthropic')
-    || raw.includes('claude')
-  ) {
-    normalized.add('messages');
+  const aliasedEndpoints = ENDPOINT_TYPE_ALIASES[raw];
+  if (aliasedEndpoints) {
+    return aliasedEndpoints;
   }
 
-  if (
-    raw.includes('/v1/responses')
-    || raw === 'responses'
-    || raw.includes('response')
-  ) {
-    normalized.add('responses');
-  }
-
-  if (
-    raw.includes('/v1/chat/completions')
-    || raw.includes('chat/completions')
-    || raw === 'chat'
-    || raw === 'chat_completions'
-    || raw === 'completions'
-    || raw.includes('chat')
-  ) {
-    normalized.add('chat');
-  }
-
-  if (raw === 'openai' || raw.includes('openai')) {
-    normalized.add('chat');
-    normalized.add('responses');
-  }
-
-  return Array.from(normalized);
+  const endpoint = ENDPOINT_PATH_ALIASES[normalizeEndpointPath(raw)];
+  return endpoint
+    ? { concrete: true, endpoints: [endpoint] }
+    : { concrete: false, endpoints: [] };
 }
 
 function preferredEndpointOrder(
   downstreamFormat: EndpointPreference,
   sitePlatform?: string,
+  siteUrl?: string,
   preferMessagesForClaudeModel = false,
   hints?: EndpointDerivationHints,
 ): UpstreamEndpoint[] {
-  const platform = normalizePlatformName(sitePlatform);
-  const oauthProvider = asTrimmedString(hints?.oauthProvider).toLowerCase();
-
   if (hints?.requestKind === 'responses-compact') {
     return ['responses'];
   }
 
-  if (platform === 'codex') {
-    return ['responses'];
+  const capability = resolveUpstreamEndpointCapability({
+    sitePlatform,
+    siteUrl,
+    downstreamFormat,
+    preferMessagesForClaudeModel,
+    oauthProvider: hints?.oauthProvider,
+  });
+  if (hints?.requestKind === 'claude-count-tokens') {
+    const supportsMessages = capability.supportedEndpoints.includes('messages')
+      || (capability.platform === 'openai' && !capability.nativeProvider);
+    return supportsMessages ? ['messages'] : [];
   }
-
-  if (platform === 'gemini' || platform === 'gemini-cli') {
-    return ['chat'];
-  }
-
-  if (platform === 'openai') {
-    return ['responses', 'chat', 'messages'];
-  }
-
-  if (platform === 'antigravity') {
-    return ['messages'];
-  }
-
-  if (platform === 'claude') {
-    return ['messages'];
-  }
-
-  if (downstreamFormat === 'responses') {
-    if (preferMessagesForClaudeModel) {
-      return ['messages', 'chat', 'responses'];
-    }
-    return ['responses', 'chat', 'messages'];
-  }
-
-  if (downstreamFormat === 'claude') {
-    return ['messages', 'chat', 'responses'];
-  }
-
-  if (downstreamFormat === 'openai' && preferMessagesForClaudeModel) {
-    return ['messages', 'chat', 'responses'];
-  }
-
-  const base = ['chat', 'messages', 'responses'] as UpstreamEndpoint[];
-  if (oauthProvider === 'codex' && base.includes('responses')) {
-    return ['responses', ...base.filter((endpoint) => endpoint !== 'responses')];
-  }
-
-  return base;
+  return capability.preferredEndpoints;
 }
 
 export async function resolveUpstreamEndpointCandidates(
@@ -151,15 +139,25 @@ export async function resolveUpstreamEndpointCandidates(
   hints?: EndpointDerivationHints,
 ): Promise<UpstreamEndpoint[]> {
   const sitePlatform = normalizePlatformName(context.site.platform);
+  const endpointCapability = resolveUpstreamEndpointCapability({
+    sitePlatform: context.site.platform,
+    siteUrl: context.site.url,
+    downstreamFormat,
+    oauthProvider: hints?.oauthProvider,
+  });
   if (hints?.requestKind === 'responses-compact') {
-    return ['responses'];
+    return endpointCapability.supportedEndpoints.includes('responses')
+      ? ['responses']
+      : [];
   }
   if (
     hints?.requiresNativeResponsesFileUrl
     && sitePlatform !== 'claude'
     && sitePlatform !== 'anyrouter'
   ) {
-    return ['responses'];
+    return endpointCapability.supportedEndpoints.includes('responses')
+      ? ['responses']
+      : [];
   }
 
   const capabilityProfile = buildEndpointCapabilityProfile({
@@ -207,16 +205,29 @@ export async function resolveUpstreamEndpointCandidates(
   const preferred = preferredEndpointOrder(
     downstreamFormat,
     context.site.platform,
+    context.site.url,
     preferMessagesForClaudeModel,
     hints,
   );
   const preferredWithCapabilities = hasNonImageFileInput
     ? (() => {
       if (sitePlatform === 'claude') return ['messages'] as UpstreamEndpoint[];
-      if (sitePlatform === 'gemini') return ['responses', 'chat'] as UpstreamEndpoint[];
+      if (sitePlatform === 'gemini') return ['chat'] as UpstreamEndpoint[];
       if (sitePlatform === 'gemini-cli') return ['chat'] as UpstreamEndpoint[];
-      if (sitePlatform === 'antigravity') return ['messages'] as UpstreamEndpoint[];
-      if (sitePlatform === 'openai') return ['responses', 'chat', 'messages'] as UpstreamEndpoint[];
+      if (sitePlatform === 'antigravity') return ['chat'] as UpstreamEndpoint[];
+      if (sitePlatform === 'openai') {
+        const capability = resolveUpstreamEndpointCapability({
+          sitePlatform: context.site.platform,
+          siteUrl: context.site.url,
+          downstreamFormat,
+          preferMessagesForClaudeModel,
+          oauthProvider: hints?.oauthProvider,
+        });
+        return [
+          'responses',
+          ...capability.supportedEndpoints.filter((endpoint) => endpoint !== 'responses'),
+        ] as UpstreamEndpoint[];
+      }
       return rankConversationFileEndpoints({
         sitePlatform,
         requestedOrder: preferMessagesForClaudeModel
@@ -273,49 +284,41 @@ export async function resolveUpstreamEndpointCandidates(
     );
     if (!matched) return finalizeCandidates(prioritizedPreferredEndpoints);
 
+    const supportedRaw = Array.isArray(matched.supportedEndpointTypes) ? matched.supportedEndpointTypes : [];
+    const normalizedEndpointTypes = supportedRaw.map((endpoint) => normalizeEndpointType(endpoint));
+    const hasConcreteEndpointHint = normalizedEndpointTypes.some((item) => item.concrete);
+    if (forceMessagesFirstForClaudeModel && !hasConcreteEndpointHint) {
+      return finalizeCandidates(prioritizedPreferredEndpoints);
+    }
     const shouldIgnoreCatalogOrderingForClaudeMessages = (
       preferMessagesForClaudeModel
       && (downstreamFormat !== 'responses' || sitePlatform !== 'openai')
     );
-    if (shouldIgnoreCatalogOrderingForClaudeMessages) {
-      return finalizeCandidates(prioritizedPreferredEndpoints);
-    }
-
-    const supportedRaw = Array.isArray(matched.supportedEndpointTypes) ? matched.supportedEndpointTypes : [];
-    const normalizedSupportedRaw = supportedRaw
-      .map((item) => asTrimmedString(item).toLowerCase())
-      .filter((item) => item.length > 0);
-    const hasConcreteEndpointHint = normalizedSupportedRaw.some((raw) => (
-      raw.includes('/v1/messages')
-      || raw.includes('/v1/chat/completions')
-      || raw.includes('/v1/responses')
-      || raw === 'messages'
-      || raw === 'chat'
-      || raw === 'chat_completions'
-      || raw === 'completions'
-      || raw === 'responses'
-    ));
-    if (forceMessagesFirstForClaudeModel && !hasConcreteEndpointHint) {
+    if (shouldIgnoreCatalogOrderingForClaudeMessages && !hasConcreteEndpointHint) {
       return finalizeCandidates(prioritizedPreferredEndpoints);
     }
 
     const supported = new Set<UpstreamEndpoint>();
-    for (const endpoint of supportedRaw) {
-      const normalizedList = normalizeEndpointTypes(endpoint);
-      for (const normalized of normalizedList) {
+    for (const normalizedEndpointType of normalizedEndpointTypes) {
+      for (const normalized of normalizedEndpointType.endpoints) {
         supported.add(normalized);
       }
     }
 
-    if (supported.size === 0) return finalizeCandidates(prioritizedPreferredEndpoints);
+    if (supported.size === 0) {
+      return finalizeCandidates(prioritizedPreferredEndpoints);
+    }
 
-    const firstSupported = prioritizedPreferredEndpoints.find((endpoint) => supported.has(endpoint));
-    if (!firstSupported) return finalizeCandidates(prioritizedPreferredEndpoints);
+    const supportedCandidates = prioritizedPreferredEndpoints.filter((endpoint) => (
+      supported.has(endpoint)
+    ));
+    if (supportedCandidates.length > 0) {
+      return finalizeCandidates(supportedCandidates);
+    }
 
-    return finalizeCandidates([
-      firstSupported,
-      ...prioritizedPreferredEndpoints.filter((endpoint) => endpoint !== firstSupported),
-    ]);
+    return hasConcreteEndpointHint
+      ? []
+      : finalizeCandidates(prioritizedPreferredEndpoints);
   } catch {
     return finalizeCandidates(prioritizedPreferredEndpoints);
   }

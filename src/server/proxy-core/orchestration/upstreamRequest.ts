@@ -1,7 +1,7 @@
 export type UpstreamEndpoint = 'chat' | 'messages' | 'responses';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object';
+  return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
 function collapseWhitespace(text: string): string {

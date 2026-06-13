@@ -174,11 +174,19 @@ function collectToolCalls(value: unknown): OpenAiChatToolCall[] {
     const name = typeof functionPart.name === 'string' ? functionPart.name : '';
     const id = typeof item.id === 'string' ? item.id : '';
     const args = typeof functionPart.arguments === 'string' ? functionPart.arguments : '';
-    if (!id && !name && !args) continue;
+    const providerFields = isRecord(item.provider_specific_fields)
+      ? item.provider_specific_fields
+      : {};
+    const thoughtSignature = typeof providerFields.thought_signature === 'string'
+      && providerFields.thought_signature.trim()
+      ? providerFields.thought_signature
+      : undefined;
+    if (!id && !name && !args && !thoughtSignature) continue;
     toolCalls.push({
       id,
       name,
       arguments: args,
+      ...(thoughtSignature ? { thoughtSignature } : {}),
     });
   }
 
@@ -191,14 +199,21 @@ function collectToolCallDeltas(value: unknown): OpenAiChatChoiceDelta['toolCallD
     .map((item, itemIndex) => {
       if (!isRecord(item)) return null;
       const functionPart = isRecord(item.function) ? item.function : {};
+      const providerFields = isRecord(item.provider_specific_fields)
+        ? item.provider_specific_fields
+        : {};
       const index = toFiniteNumber(item.index);
       const delta = {
         index: index !== undefined ? Math.max(0, Math.trunc(index)) : itemIndex,
         id: typeof item.id === 'string' && item.id.trim() ? item.id : undefined,
         name: typeof functionPart.name === 'string' && functionPart.name.trim() ? functionPart.name : undefined,
         argumentsDelta: typeof functionPart.arguments === 'string' ? functionPart.arguments : undefined,
+        thoughtSignature: typeof providerFields.thought_signature === 'string'
+          && providerFields.thought_signature.trim()
+          ? providerFields.thought_signature
+          : undefined,
       };
-      if (!delta.id && !delta.name && !delta.argumentsDelta) return null;
+      if (!delta.id && !delta.name && !delta.argumentsDelta && !delta.thoughtSignature) return null;
       return delta;
     })
     .filter((item): item is NonNullable<typeof item> => !!item);
@@ -292,6 +307,9 @@ export function extractChatChoices(payload: unknown): OpenAiChatChoice[] {
       reasoningContent: typeof message.reasoning_content === 'string'
         ? message.reasoning_content
         : parsed.reasoning,
+      ...(typeof message.reasoning_signature === 'string' && message.reasoning_signature.trim()
+        ? { reasoningSignature: message.reasoning_signature.trim() }
+        : {}),
       toolCalls,
       finishReason,
       ...(annotations.length > 0 ? { annotations } : {}),
@@ -327,6 +345,9 @@ export function extractChatChoiceEvents(payload: unknown): OpenAiChatChoiceDelta
       ...(parsed.content ? { contentDelta: parsed.content } : {}),
       ...((typeof delta.reasoning_content === 'string' ? delta.reasoning_content : parsed.reasoning)
         ? { reasoningDelta: (typeof delta.reasoning_content === 'string' ? delta.reasoning_content : parsed.reasoning) }
+        : {}),
+      ...(typeof delta.reasoning_signature === 'string' && delta.reasoning_signature.trim()
+        ? { reasoningSignature: delta.reasoning_signature.trim() }
         : {}),
       ...(toolCallDeltas ? { toolCallDeltas } : {}),
       finishReason: typeof choiceRecord.finish_reason === 'string' ? choiceRecord.finish_reason : null,

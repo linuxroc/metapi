@@ -84,6 +84,7 @@ export function buildNormalizedFinalToOpenAiChatPayload(
       index: 0,
       content: normalized.content,
       reasoningContent: normalized.reasoningContent,
+      reasoningSignature: normalized.reasoningSignature,
       toolCalls: normalized.toolCalls,
       finishReason: normalized.toolCalls.length > 0 ? 'tool_calls' : normalized.finishReason,
       annotations: chatNormalized.annotations,
@@ -98,6 +99,11 @@ export function buildNormalizedFinalToOpenAiChatPayload(
     if (choice.reasoningContent) {
       message.reasoning_content = choice.reasoningContent;
     }
+    const reasoningSignature = choice.reasoningSignature
+      || (choice.index === 0 ? normalized.reasoningSignature : undefined);
+    if (reasoningSignature) {
+      message.reasoning_signature = reasoningSignature;
+    }
     if (Array.isArray(choice.toolCalls) && choice.toolCalls.length > 0) {
       message.tool_calls = choice.toolCalls.map((toolCall) => ({
         id: toolCall.id,
@@ -106,6 +112,13 @@ export function buildNormalizedFinalToOpenAiChatPayload(
           name: toolCall.name,
           arguments: toolCall.arguments,
         },
+        ...(toolCall.thoughtSignature
+          ? {
+            provider_specific_fields: {
+              thought_signature: toolCall.thoughtSignature,
+            },
+          }
+          : {}),
       }));
       if (!choice.content) {
         message.content = '';
@@ -156,6 +169,9 @@ export function buildNormalizedFinalToOpenAiChatChunks(normalized: NormalizedFin
             content: choice.content || '',
           };
           if (choice.reasoningContent) delta.reasoning_content = choice.reasoningContent;
+          const reasoningSignature = choice.reasoningSignature
+            || (choice.index === 0 ? normalized.reasoningSignature : undefined);
+          if (reasoningSignature) delta.reasoning_signature = reasoningSignature;
           if (toolCalls.length > 0) {
             delta.tool_calls = toolCalls.map((toolCall, toolIndex) => ({
               index: toolIndex,
@@ -165,6 +181,13 @@ export function buildNormalizedFinalToOpenAiChatChunks(normalized: NormalizedFin
                 name: toolCall.name,
                 arguments: toolCall.arguments,
               },
+              ...(toolCall.thoughtSignature
+                ? {
+                  provider_specific_fields: {
+                    thought_signature: toolCall.thoughtSignature,
+                  },
+                }
+                : {}),
             }));
           }
           if (Array.isArray(choice.annotations) && choice.annotations.length > 0) {

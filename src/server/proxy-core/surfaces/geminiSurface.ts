@@ -5,7 +5,7 @@ import { and, eq } from 'drizzle-orm';
 import { config } from '../../config.js';
 import { db, schema } from '../../db/index.js';
 import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
-import { parseProxyUsage } from '../../services/proxyUsageParser.js';
+import { mergeProxyUsage, parseProxyUsage } from '../../services/proxyUsageParser.js';
 import { isModelAllowedByPolicyOrAllowedRoutes } from '../../services/downstreamApiKeyService.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
 import { buildOauthProviderHeaders } from '../../services/oauth/service.js';
@@ -465,6 +465,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
         }
       } catch (error) {
         await tokenRouter.recordFailure?.(selected.channel.id, {
+          status: 502,
           errorText: error instanceof Error ? error.message : 'Gemini upstream request failed',
         });
         lastStatus = 502;
@@ -1384,12 +1385,30 @@ export async function geminiProxyRoute(app: FastifyInstance) {
         const upstream = endpointResult.upstream;
         const firstByteLatencyMs = getObservedResponseMeta(upstream)?.firstByteLatencyMs ?? null;
         const rawText = await readRuntimeResponseText(upstream);
-        let upstreamData: unknown = rawText;
-        try {
-          upstreamData = JSON.parse(rawText);
-        } catch {}
-        const parsedUsage = parseProxyUsage(upstreamData);
-        const normalizedFinal = normalizeUpstreamFinalResponse(upstreamData, actualModel, rawText);
+        const upstreamContentType = upstream.headers.get('content-type') || '';
+        const isUpstreamSse = (
+          upstreamContentType.toLowerCase().includes('text/event-stream')
+          || /(^|\n)\s*(?:event|data):/.test(rawText)
+        );
+        let parsedUsage = parseProxyUsage(null);
+        let normalizedFinal: ReturnType<typeof normalizeUpstreamFinalResponse>;
+        if (isUpstreamSse) {
+          const sseResult = geminiGenerateContentTransformer.compatibility.normalizeUpstreamSseTextToFinal({
+            rawText,
+            modelName: actualModel,
+          });
+          normalizedFinal = sseResult.normalized;
+          for (const payload of sseResult.payloads) {
+            parsedUsage = mergeProxyUsage(parsedUsage, parseProxyUsage(payload));
+          }
+        } else {
+          let upstreamData: unknown = rawText;
+          try {
+            upstreamData = JSON.parse(rawText);
+          } catch {}
+          parsedUsage = parseProxyUsage(upstreamData);
+          normalizedFinal = normalizeUpstreamFinalResponse(upstreamData, actualModel, rawText);
+        }
         const geminiResponse = geminiGenerateContentTransformer.compatibility.serializeNormalizedFinalToGemini({
           normalized: normalizedFinal,
           usage: {
@@ -1445,6 +1464,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
           },
         });
         await tokenRouter.recordFailure?.(selected.channel.id, {
+          status: 502,
           errorText: error instanceof Error ? error.message : 'Gemini upstream request failed',
         });
         await logProxy(

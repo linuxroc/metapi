@@ -12,7 +12,7 @@ import { normalizeInputFileBlock, toOpenAiChatFileBlock } from '../../shared/inp
 import { buildShortToolNameMap, getShortToolName } from '../../shared/toolNameShortener.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object';
+  return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
 function asTrimmedString(value: unknown): string {
@@ -376,8 +376,18 @@ function convertOpenAiToolsToResponses(
         };
       }
 
-      if (type === 'custom' && asTrimmedString(item.name)) {
-        return item;
+      if (type === 'custom') {
+        const custom = isRecord(item.custom) ? item.custom : item;
+        const name = asTrimmedString(custom.name);
+        if (!name) return null;
+        const mapped: Record<string, unknown> = {
+          type: 'custom',
+          name,
+        };
+        const description = asTrimmedString(custom.description);
+        if (description) mapped.description = description;
+        if (custom.format !== undefined) mapped.format = cloneJsonValue(custom.format);
+        return mapped;
       }
 
       return null;
@@ -437,6 +447,45 @@ function convertOpenAiToolChoiceToResponses(
     const name = asTrimmedString(rawToolChoice.function.name);
     if (!name) return 'required';
     return { type: 'function', name: getShortToolName(name, toolNameMap) };
+  }
+  if (type === 'custom') {
+    const custom = isRecord(rawToolChoice.custom) ? rawToolChoice.custom : rawToolChoice;
+    const name = asTrimmedString(custom.name);
+    if (!name) return 'required';
+    return { type: 'custom', name };
+  }
+  if (type === 'allowed_tools') {
+    const allowedTools = isRecord(rawToolChoice.allowed_tools)
+      ? rawToolChoice.allowed_tools
+      : rawToolChoice;
+    const tools = Array.isArray(allowedTools.tools)
+      ? allowedTools.tools
+        .map((tool): Record<string, unknown> | null => {
+          if (!isRecord(tool)) return null;
+          const toolType = asTrimmedString(tool.type).toLowerCase();
+          if (toolType === 'function') {
+            const name = asTrimmedString(
+              (isRecord(tool.function) ? tool.function.name : undefined) ?? tool.name,
+            );
+            return name
+              ? { type: 'function', name: getShortToolName(name, toolNameMap) }
+              : null;
+          }
+          if (toolType === 'custom') {
+            const custom = isRecord(tool.custom) ? tool.custom : tool;
+            const name = asTrimmedString(custom.name);
+            return name ? { type: 'custom', name } : null;
+          }
+          return null;
+        })
+        .filter((tool): tool is Record<string, unknown> => tool !== null)
+      : [];
+    if (tools.length === 0) return 'required';
+    return {
+      type: 'allowed_tools',
+      mode: asTrimmedString(allowedTools.mode).toLowerCase() === 'required' ? 'required' : 'auto',
+      tools,
+    };
   }
 
   return rawToolChoice;
@@ -768,7 +817,9 @@ export function convertOpenAiBodyToResponsesBody(
   if (openaiBody.stream_options !== undefined) body.stream_options = openaiBody.stream_options;
   if (openaiBody.response_format !== undefined) {
     const existingTextConfig = cloneRecord(body.text) || {};
-    existingTextConfig.format = cloneJsonValue(openaiBody.response_format);
+    existingTextConfig.format = convertOpenAiResponseFormatToResponsesTextFormat(
+      openaiBody.response_format,
+    );
     body.text = existingTextConfig;
   }
 
@@ -909,16 +960,28 @@ function toOpenAiMessageContent(content: unknown): string | Array<string | Recor
   return blocks;
 }
 
-function convertResponsesToolsToOpenAi(rawTools: unknown): unknown {
-  if (!Array.isArray(rawTools)) return rawTools;
+function convertResponsesToolsToOpenAi(rawTools: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(rawTools)) return [];
 
   return rawTools
     .map((item) => {
-      if (!isRecord(item)) return item;
+      if (!isRecord(item)) return null;
       const type = asTrimmedString(item.type).toLowerCase();
 
-      if (type === 'custom' || type === 'image_generation') return item;
-      if (type !== 'function') return item;
+      if (type === 'custom') {
+        const custom = isRecord(item.custom) ? item.custom : item;
+        const name = asTrimmedString(custom.name);
+        if (!name) return null;
+        const definition: Record<string, unknown> = { name };
+        const description = asTrimmedString(custom.description);
+        if (description) definition.description = description;
+        if (custom.format !== undefined) definition.format = cloneJsonValue(custom.format);
+        return {
+          type: 'custom',
+          custom: definition,
+        };
+      }
+      if (type !== 'function') return null;
       if (isRecord(item.function) && asTrimmedString(item.function.name)) return item;
 
       const name = asTrimmedString(item.name);
@@ -936,6 +999,46 @@ function convertResponsesToolsToOpenAi(rawTools: unknown): unknown {
       };
     })
     .filter((item): item is Record<string, unknown> => !!item);
+}
+
+function convertResponsesStreamOptionsToOpenAiChat(
+  rawStreamOptions: unknown,
+): Record<string, unknown> | undefined {
+  if (!isRecord(rawStreamOptions)) return undefined;
+  const includeUsage = toBooleanLike(rawStreamOptions.include_usage);
+  return includeUsage === undefined ? undefined : { include_usage: includeUsage };
+}
+
+function convertResponsesTextFormatToOpenAiResponseFormat(rawFormat: unknown): unknown {
+  if (!isRecord(rawFormat)) return cloneJsonValue(rawFormat);
+  const type = asTrimmedString(rawFormat.type).toLowerCase();
+  if (type !== 'json_schema') return cloneJsonValue(rawFormat);
+  if (isRecord(rawFormat.json_schema)) return cloneJsonValue(rawFormat);
+  if (!isRecord(rawFormat.schema)) return cloneJsonValue(rawFormat);
+
+  return {
+    type: 'json_schema',
+    json_schema: {
+      name: asTrimmedString(rawFormat.name) || 'response',
+      schema: cloneJsonValue(rawFormat.schema),
+      ...(typeof rawFormat.strict === 'boolean' ? { strict: rawFormat.strict } : {}),
+    },
+  };
+}
+
+function convertOpenAiResponseFormatToResponsesTextFormat(rawFormat: unknown): unknown {
+  if (!isRecord(rawFormat)) return cloneJsonValue(rawFormat);
+  const type = asTrimmedString(rawFormat.type).toLowerCase();
+  if (type !== 'json_schema') return cloneJsonValue(rawFormat);
+  const jsonSchema = isRecord(rawFormat.json_schema) ? rawFormat.json_schema : rawFormat;
+  if (!isRecord(jsonSchema.schema)) return cloneJsonValue(rawFormat);
+
+  return {
+    type: 'json_schema',
+    name: asTrimmedString(jsonSchema.name) || 'response',
+    schema: cloneJsonValue(jsonSchema.schema),
+    ...(typeof jsonSchema.strict === 'boolean' ? { strict: jsonSchema.strict } : {}),
+  };
 }
 
 function convertResponsesToolChoiceToOpenAi(rawToolChoice: unknown): unknown {
@@ -962,6 +1065,48 @@ function convertResponsesToolChoiceToOpenAi(rawToolChoice: unknown): unknown {
     return {
       type: 'function',
       function: { name },
+    };
+  }
+  if (type === 'custom') {
+    const custom = isRecord(rawToolChoice.custom) ? rawToolChoice.custom : rawToolChoice;
+    const name = asTrimmedString(custom.name);
+    if (!name) return 'required';
+    return {
+      type: 'custom',
+      custom: { name },
+    };
+  }
+  if (type === 'allowed_tools') {
+    const allowedTools = isRecord(rawToolChoice.allowed_tools)
+      ? rawToolChoice.allowed_tools
+      : rawToolChoice;
+    const tools = Array.isArray(allowedTools.tools)
+      ? allowedTools.tools
+        .map((tool): Record<string, unknown> | null => {
+          if (!isRecord(tool)) return null;
+          const toolType = asTrimmedString(tool.type).toLowerCase();
+          if (toolType === 'function') {
+            const name = asTrimmedString(
+              (isRecord(tool.function) ? tool.function.name : undefined) ?? tool.name,
+            );
+            return name ? { type: 'function', function: { name } } : null;
+          }
+          if (toolType === 'custom') {
+            const custom = isRecord(tool.custom) ? tool.custom : tool;
+            const name = asTrimmedString(custom.name);
+            return name ? { type: 'custom', custom: { name } } : null;
+          }
+          return null;
+        })
+        .filter((tool): tool is Record<string, unknown> => tool !== null)
+      : [];
+    if (tools.length === 0) return 'required';
+    return {
+      type: 'allowed_tools',
+      allowed_tools: {
+        mode: asTrimmedString(allowedTools.mode).toLowerCase() === 'required' ? 'required' : 'auto',
+        tools,
+      },
     };
   }
 
@@ -1122,32 +1267,41 @@ export function convertResponsesBodyToOpenAiBody(
     payload.top_p = normalizedBody.top_p;
   }
   if (typeof normalizedBody.max_output_tokens === 'number' && Number.isFinite(normalizedBody.max_output_tokens)) {
-    payload.max_tokens = normalizedBody.max_output_tokens;
+    payload.max_completion_tokens = normalizedBody.max_output_tokens;
   }
   if (normalizedBody.metadata !== undefined) payload.metadata = cloneJsonValue(normalizedBody.metadata);
   if (normalizedBody.modalities !== undefined) payload.modalities = cloneJsonValue(normalizedBody.modalities);
   if (normalizedBody.audio !== undefined) payload.audio = cloneJsonValue(normalizedBody.audio);
   if (normalizedBody.parallel_tool_calls !== undefined) payload.parallel_tool_calls = normalizedBody.parallel_tool_calls;
-  if (normalizedBody.tools !== undefined) payload.tools = convertResponsesToolsToOpenAi(normalizedBody.tools);
-  if (normalizedBody.tool_choice !== undefined) payload.tool_choice = convertResponsesToolChoiceToOpenAi(normalizedBody.tool_choice);
-  if (Array.isArray(payload.tools) && payload.tools.length === 0) {
-    delete payload.tool_choice;
+  const openAiTools = convertResponsesToolsToOpenAi(normalizedBody.tools);
+  if (openAiTools.length > 0) {
+    payload.tools = openAiTools;
+    if (normalizedBody.tool_choice !== undefined) {
+      payload.tool_choice = convertResponsesToolChoiceToOpenAi(normalizedBody.tool_choice);
+    }
   }
   if (normalizedBody.safety_identifier !== undefined) payload.safety_identifier = normalizedBody.safety_identifier;
-  if (normalizedBody.max_tool_calls !== undefined) payload.max_tool_calls = normalizedBody.max_tool_calls;
   if (normalizedBody.prompt_cache_key !== undefined) payload.prompt_cache_key = normalizedBody.prompt_cache_key;
-  if (normalizedBody.prompt_cache_retention !== undefined) payload.prompt_cache_retention = normalizedBody.prompt_cache_retention;
-  if (normalizedBody.background !== undefined) payload.background = normalizedBody.background;
   if (normalizedBody.user !== undefined) payload.user = normalizedBody.user;
-  if (normalizedBody.include !== undefined) payload.include = cloneJsonValue(normalizedBody.include);
-  if (normalizedBody.previous_response_id !== undefined) payload.previous_response_id = normalizedBody.previous_response_id;
-  if (normalizedBody.truncation !== undefined) payload.truncation = normalizedBody.truncation;
-  if (normalizedBody.reasoning !== undefined) payload.reasoning = cloneJsonValue(normalizedBody.reasoning);
   if (normalizedBody.service_tier !== undefined) payload.service_tier = normalizedBody.service_tier;
-  if (normalizedBody.top_logprobs !== undefined) payload.top_logprobs = normalizedBody.top_logprobs;
-  if (normalizedBody.stream_options !== undefined) payload.stream_options = normalizedBody.stream_options;
+  if (normalizedBody.top_logprobs !== undefined) {
+    payload.logprobs = true;
+    payload.top_logprobs = normalizedBody.top_logprobs;
+  }
+  const streamOptions = convertResponsesStreamOptionsToOpenAiChat(normalizedBody.stream_options);
+  if (streamOptions) payload.stream_options = streamOptions;
+  if (isRecord(normalizedBody.reasoning)) {
+    const reasoningEffort = asTrimmedString(normalizedBody.reasoning.effort);
+    const reasoningBudget = toFiniteIntegerLike(normalizedBody.reasoning.budget_tokens);
+    const reasoningSummary = asTrimmedString(normalizedBody.reasoning.summary);
+    if (reasoningEffort) payload.reasoning_effort = reasoningEffort;
+    if (reasoningBudget !== null) payload.reasoning_budget = reasoningBudget;
+    if (reasoningSummary) payload.reasoning_summary = reasoningSummary;
+  }
   if (isRecord(normalizedBody.text) && normalizedBody.text.format !== undefined) {
-    payload.response_format = cloneJsonValue(normalizedBody.text.format);
+    payload.response_format = convertResponsesTextFormatToOpenAiResponseFormat(
+      normalizedBody.text.format,
+    );
   }
   if (isRecord(normalizedBody.text) && asTrimmedString(normalizedBody.text.verbosity)) {
     payload.verbosity = asTrimmedString(normalizedBody.text.verbosity);

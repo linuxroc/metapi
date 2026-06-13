@@ -18,6 +18,16 @@ function parseOpenAiSsePayload(lines: string[]): Record<string, unknown> {
 }
 
 describe('chatFormatsCore inline think parsing', () => {
+  it('does not preserve arrays in object-only request fields', () => {
+    const converted = convertClaudeRequestToOpenAiBody({
+      model: 'claude-test',
+      messages: [{ role: 'user', content: 'hello' }],
+      metadata: [],
+    });
+
+    expect(converted.payload.metadata).toBeUndefined();
+  });
+
   it('tracks split think tags across stream chunks', () => {
     const context = createStreamTransformContext('gpt-test');
 
@@ -368,7 +378,7 @@ describe('chatFormatsCore inline think parsing', () => {
     });
   });
 
-  it('maps response.failed to a stop finish reason instead of inventing a chat error finish reason', () => {
+  it('preserves response.failed as an error terminal instead of reporting success', () => {
     const context = createStreamTransformContext('gpt-test');
 
     expect(normalizeUpstreamStreamEvent({
@@ -378,8 +388,73 @@ describe('chatFormatsCore inline think parsing', () => {
         status: 'failed',
       },
     }, context, 'gpt-test')).toEqual({
-      finishReason: 'stop',
+      finishReason: 'error',
       done: true,
+    });
+  });
+
+  it('preserves Anthropic reasoning signatures in final and streaming normalization', () => {
+    expect(normalizeUpstreamFinalResponse({
+      id: 'msg_signature_final',
+      type: 'message',
+      model: 'claude-sonnet-4-5',
+      content: [{
+        type: 'thinking',
+        thinking: 'plan',
+        signature: 'sig-final',
+      }],
+      stop_reason: 'end_turn',
+    }, 'claude-sonnet-4-5')).toMatchObject({
+      reasoningContent: 'plan',
+      reasoningSignature: 'metapi:anthropic-signature:sig-final',
+    });
+
+    expect(normalizeUpstreamStreamEvent({
+      type: 'content_block_delta',
+      index: 0,
+      delta: {
+        type: 'signature_delta',
+        signature: 'sig-stream',
+      },
+    }, createStreamTransformContext('claude-sonnet-4-5'), 'claude-sonnet-4-5')).toEqual({
+      reasoningSignature: 'metapi:anthropic-signature:sig-stream',
+    });
+  });
+
+  it('treats explicit tool failure terminals as errors', () => {
+    expect(normalizeUpstreamFinalResponse({
+      responseId: 'gemini_unknown_finish',
+      modelVersion: 'gemini-test',
+      candidates: [{
+        finishReason: 'TOOL_ERROR',
+        content: { role: 'model', parts: [] },
+      }],
+    }, 'gemini-test')).toMatchObject({
+      finishReason: 'error',
+    });
+  });
+
+  it('does not fail closed on unknown provider terminal reasons', () => {
+    expect(normalizeUpstreamFinalResponse({
+      responseId: 'gemini_new_finish',
+      modelVersion: 'gemini-test',
+      candidates: [{
+        finishReason: 'NEW_PROVIDER_TERMINAL',
+        content: { role: 'model', parts: [{ text: 'completed output' }] },
+      }],
+    }, 'gemini-test')).toMatchObject({
+      content: 'completed output',
+      finishReason: 'stop',
+    });
+
+    expect(normalizeUpstreamStreamEvent({
+      candidates: [{
+        finishReason: 'NEW_PROVIDER_TERMINAL',
+        content: { role: 'model', parts: [{ text: 'completed output' }] },
+      }],
+    }, createStreamTransformContext('gemini-test'), 'gemini-test')).toMatchObject({
+      contentDelta: 'completed output',
+      finishReason: null,
     });
   });
 
@@ -645,12 +720,136 @@ describe('chatFormatsCore inline think parsing', () => {
       status: 'failed',
       output: [],
     }, 'gpt-test')).toMatchObject({
-      finishReason: 'stop',
+      finishReason: 'error',
+    });
+  });
+});
+
+describe('chatFormatsCore protocol regressions', () => {
+  it('maps Anthropic model context window termination to length', () => {
+    expect(normalizeUpstreamFinalResponse({
+      id: 'msg_context_limit',
+      type: 'message',
+      model: 'claude-test',
+      content: [{ type: 'text', text: 'partial' }],
+      stop_reason: 'model_context_window_exceeded',
+    }, 'claude-test')).toMatchObject({
+      content: 'partial',
+      finishReason: 'length',
+    });
+
+    const context = createStreamTransformContext('claude-test');
+    expect(normalizeUpstreamStreamEvent({
+      type: 'message_delta',
+      delta: {
+        stop_reason: 'model_context_window_exceeded',
+      },
+    }, context, 'claude-test')).toMatchObject({
+      finishReason: 'length',
+    });
+  });
+
+  it('does not terminate Gemini SSE on a non-terminal function-call chunk', () => {
+    const context = createStreamTransformContext('gemini-test');
+    const claudeContext = createClaudeDownstreamContext();
+    const normalized = normalizeUpstreamStreamEvent({
+      responseId: 'gemini-response-1',
+      candidates: [{
+        content: {
+          role: 'model',
+          parts: [{
+            functionCall: {
+              id: 'call_1',
+              name: 'lookup',
+              args: { q: 'weather' },
+            },
+          }],
+        },
+      }],
+    }, context, 'gemini-test');
+
+    expect(normalized.finishReason).toBeNull();
+    const payload = parseOpenAiSsePayload(
+      serializeNormalizedStreamEvent('openai', normalized, context, claudeContext),
+    );
+    expect((payload.choices as any[])[0].finish_reason).toBeNull();
+  });
+
+  it('preserves Gemini function-call thought signatures in OpenAI SSE', () => {
+    const context = createStreamTransformContext('gemini-test');
+    const claudeContext = createClaudeDownstreamContext();
+    const normalized = normalizeUpstreamStreamEvent({
+      responseId: 'gemini-response-2',
+      candidates: [{
+        content: {
+          role: 'model',
+          parts: [{
+            functionCall: {
+              id: 'call_2',
+              name: 'lookup',
+              args: { q: 'weather' },
+            },
+            thoughtSignature: 'gemini-tool-signature',
+          }],
+        },
+      }],
+    }, context, 'gemini-test');
+
+    expect(normalized.toolCallDeltas).toEqual([{
+      index: 0,
+      id: 'call_2',
+      name: 'lookup',
+      argumentsDelta: '{"q":"weather"}',
+      thoughtSignature: 'gemini-tool-signature',
+    }]);
+    const payload = parseOpenAiSsePayload(
+      serializeNormalizedStreamEvent('openai', normalized, context, claudeContext),
+    );
+    expect(payload).toMatchObject({
+      choices: [{
+        delta: {
+          tool_calls: [{
+            provider_specific_fields: {
+              thought_signature: 'gemini-tool-signature',
+            },
+          }],
+        },
+        finish_reason: null,
+      }],
     });
   });
 });
 
 describe('convertClaudeRequestToOpenAiBody', () => {
+  it('does not invent a max_tokens limit when the downstream request omits it', () => {
+    const { payload } = convertClaudeRequestToOpenAiBody({
+      model: 'claude-opus-4-6',
+      messages: [{ role: 'user', content: 'hello' }],
+    });
+
+    expect(payload.max_tokens).toBeUndefined();
+  });
+
+  it('maps Claude disabled parallel tool use to OpenAI parallel_tool_calls', () => {
+    const { payload } = convertClaudeRequestToOpenAiBody({
+      model: 'claude-opus-4-6',
+      messages: [{ role: 'user', content: 'hello' }],
+      tools: [{
+        name: 'lookup',
+        input_schema: { type: 'object' },
+      }],
+      tool_choice: {
+        type: 'auto',
+        disable_parallel_tool_use: true,
+      },
+    });
+
+    expect(payload).toMatchObject({
+      tool_choice: 'auto',
+      parallel_tool_calls: false,
+    });
+  });
+
   it('keeps Claude tool_result content structured when a tool produces image blocks', () => {
     const payload = {
       model: 'gpt-test',

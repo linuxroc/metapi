@@ -25,6 +25,10 @@ import {
   extractAnthropicMessagesSessionId,
   extractAnthropicMessagesContinuationIdsFromResponse,
 } from '../../transformers/anthropic/messages/sessionId.js';
+import {
+  encodeSessionKeyPart,
+  normalizeSessionIdentifier,
+} from '../../contracts/sessionIdentifier.js';
 import { config } from '../../config.js';
 
 type SelectedChannel = Awaited<ReturnType<typeof tokenRouter.selectChannel>>;
@@ -186,8 +190,18 @@ export function buildProtocolSessionKey(input: ProtocolSessionKeyInput): string 
   const path = trimmedPath.length > 0 ? trimmedPath : '/';
   const trimmedModel = (input.requestedModel || '').trim();
   const model = trimmedModel.length > 0 ? trimmedModel : '_';
-  const cont = input.continuationId.trim();
-  return `proto-v1|${keyIdSlot}|${path}|${model}|${input.protocolId}|${cont}`;
+  const cont = normalizeSessionIdentifier(input.continuationId);
+  if (!cont) {
+    throw new Error('Invalid protocol continuation identifier');
+  }
+  return [
+    'proto-v1',
+    keyIdSlot,
+    encodeSessionKeyPart(path),
+    encodeSessionKeyPart(model),
+    input.protocolId,
+    encodeSessionKeyPart(cont),
+  ].join('|');
 }
 
 export async function selectSurfaceChannelForAttempt(input: {

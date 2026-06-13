@@ -4,7 +4,7 @@ import {
 } from '../../shared/reasoningTransport.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object';
+  return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
 const VALID_ANTHROPIC_TOOL_CHOICE_TYPES = new Set(['auto', 'none', 'any', 'tool']);
@@ -165,10 +165,8 @@ function sanitizeAnthropicThinkingConfig(
     const budgetTokens = toPositiveInteger(value.budget_tokens ?? value.budgetTokens);
     if (budgetTokens) {
       return {
-        value: {
-          type: 'enabled',
-          budget_tokens: budgetTokens,
-        },
+        value: { type: 'adaptive' },
+        error: 'budget_tokens is not supported when thinking.type is adaptive; use output_config.effort instead',
       };
     }
   }
@@ -895,6 +893,9 @@ export function convertOpenAiBodyToAnthropicMessagesBody(
   openaiBody: Record<string, unknown>,
   modelName: string,
   stream: boolean,
+  options: {
+    defaultMaxTokens?: number;
+  } = {},
 ): Record<string, unknown> {
   const rawMessages = Array.isArray(openaiBody.messages) ? openaiBody.messages : [];
   const systemContents: string[] = [];
@@ -1037,11 +1038,23 @@ export function convertOpenAiBodyToAnthropicMessagesBody(
     });
   }
 
+  const maxTokens = (
+    toFiniteNumber(openaiBody.max_output_tokens)
+    ?? toFiniteNumber(openaiBody.max_completion_tokens)
+    ?? toFiniteNumber(openaiBody.max_tokens)
+    ?? toFiniteNumber(options.defaultMaxTokens)
+  );
+  if (maxTokens === null || maxTokens <= 0) {
+    throw new Error(
+      'Anthropic Messages requires max_tokens; provide an explicit OpenAI token limit or a configured default',
+    );
+  }
+
   const body: Record<string, unknown> = {
     model: modelName,
     stream,
     messages,
-    max_tokens: toFiniteNumber(openaiBody.max_tokens) ?? 4096,
+    max_tokens: Math.trunc(maxTokens),
   };
 
   const openAiMetadata = openaiBody.metadata;

@@ -68,6 +68,7 @@
 | `PROXY_TOKEN` | 下游客户端调用 `/v1/*` 时使用的 Bearer Token |
 | `TZ` | 服务时区，影响定时任务和日志（如 `Asia/Shanghai`） |
 | `PORT` | 内部监听端口（默认 `4000`，一般无需修改） |
+| `TRUST_PROXY` | 仅在受控反向代理后设置为 `true`；公网直连保持 `false` |
 
 部署完成后，通过 Zeabur 分配的域名访问后台管理面板即可。
 

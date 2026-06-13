@@ -55,6 +55,7 @@ describe('non-cache cross-protocol field matrix', () => {
     const openAiToClaude = convertOpenAiBodyToAnthropicMessagesBody(
       {
         model: 'gpt-5',
+        max_tokens: 256,
         messages: [{ role: 'user', content: 'search' }],
         tools: [{ type: 'web_search' }],
       },

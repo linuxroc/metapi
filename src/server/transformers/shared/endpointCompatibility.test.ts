@@ -4,6 +4,7 @@ import {
   hasEndpointMismatchHint,
   inferRequiredEndpointFromProtocolError,
   inferSuggestedEndpointFromUpstreamError,
+  isEndpointDowngradeError,
   promoteRequiredEndpointCandidateAfterProtocolError,
 } from './endpointCompatibility.js';
 
@@ -44,6 +45,57 @@ describe('hasEndpointMismatchHint', () => {
 
   it('ignores generic upstream errors without endpoint hints', () => {
     expect(hasEndpointMismatchHint('{"error":{"type":"upstream_error","message":"Upstream request failed"}}')).toBe(false);
+    expect(hasEndpointMismatchHint('{"error":{"message":"model not found"}}')).toBe(false);
+    expect(hasEndpointMismatchHint('{"error":{"message":"resource does not exist"}}')).toBe(false);
+    expect(hasEndpointMismatchHint('{"error":{"message":"unsupported image format"}}')).toBe(false);
+  });
+
+  it('recognizes localized endpoint mismatch vocabulary without matching model errors', () => {
+    expect(hasEndpointMismatchHint('接口不存在')).toBe(true);
+    expect(hasEndpointMismatchHint('不支持该端点')).toBe(true);
+    expect(hasEndpointMismatchHint('请求路径未找到')).toBe(true);
+    expect(hasEndpointMismatchHint('该路由不存在')).toBe(true);
+    expect(hasEndpointMismatchHint('当前模型不支持图片输入')).toBe(false);
+  });
+});
+
+describe('isEndpointDowngradeError', () => {
+  it('does not downgrade generic invalid requests without endpoint mismatch evidence', () => {
+    expect(isEndpointDowngradeError(400, JSON.stringify({
+      error: {
+        type: 'invalid_request_error',
+        message: 'request validation failed',
+      },
+    }))).toBe(false);
+  });
+
+  it('still downgrades invalid requests that explicitly identify an endpoint mismatch', () => {
+    expect(isEndpointDowngradeError(400, JSON.stringify({
+      error: {
+        type: 'invalid_request_error',
+        message: 'unsupported endpoint /v1/chat/completions',
+      },
+    }))).toBe(true);
+  });
+
+  it('downgrades localized endpoint mismatch errors on HTTP 400', () => {
+    expect(isEndpointDowngradeError(400, '接口不存在')).toBe(true);
+    expect(isEndpointDowngradeError(400, '{"error":{"message":"请求路径未找到"}}')).toBe(true);
+    expect(isEndpointDowngradeError(400, '当前模型不支持图片输入')).toBe(false);
+  });
+
+  it('does not downgrade business, model, parameter, or content errors', () => {
+    expect(isEndpointDowngradeError(404, '{"error":{"type":"invalid_request_error","message":"model not found"}}')).toBe(false);
+    expect(isEndpointDowngradeError(404, '{"error":{"type":"not_found_error","code":"not_found","message":"file not found"}}')).toBe(false);
+    expect(isEndpointDowngradeError(400, '{"error":{"message":"unsupported parameter: temperature"}}')).toBe(false);
+    expect(isEndpointDowngradeError(400, '{"error":{"message":"unsupported image format"}}')).toBe(false);
+    expect(isEndpointDowngradeError(400, '{"error":{"code":"bad_response_status_code","message":"upstream returned 502"}}')).toBe(false);
+  });
+
+  it('downgrades only explicit endpoint failures for ambiguous HTTP 404 responses', () => {
+    expect(isEndpointDowngradeError(404, '{"error":{"message":"endpoint not found: /v1/messages"}}')).toBe(true);
+    expect(isEndpointDowngradeError(404, 'Cannot POST /v1/responses')).toBe(true);
+    expect(isEndpointDowngradeError(404, 'not found')).toBe(false);
   });
 });
 

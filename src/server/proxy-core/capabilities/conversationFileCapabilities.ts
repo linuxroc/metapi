@@ -1,5 +1,6 @@
 import { inferInputFileMimeType, normalizeInputFileBlock } from '../../transformers/shared/inputFile.js';
 import { classifyConversationFileMimeType } from '../../../shared/conversationFileTypes.js';
+import { resolveUpstreamEndpointCapability } from './upstreamEndpointCapabilities.js';
 
 export type ConversationFileTransport = 'unsupported' | 'inline_only' | 'native';
 export type ConversationFileEndpoint = 'chat' | 'messages' | 'responses';
@@ -122,6 +123,20 @@ export function resolveConversationFileEndpointCapability(input: {
 }): ConversationFileEndpointCapability {
   const platform = asTrimmedString(input.sitePlatform).toLowerCase();
   const endpoint = input.endpoint;
+  const endpointCapability = resolveUpstreamEndpointCapability({
+    sitePlatform: platform,
+    downstreamFormat: endpoint === 'responses'
+      ? 'responses'
+      : (endpoint === 'messages' ? 'claude' : 'openai'),
+  });
+  if (!endpointCapability.supportedEndpoints.includes(endpoint)) {
+    return {
+      image: 'unsupported',
+      audio: 'unsupported',
+      document: 'unsupported',
+      preservesRemoteDocumentUrl: false,
+    };
+  }
 
   if (platform === 'codex') {
     if (endpoint === 'responses') {
@@ -175,14 +190,6 @@ export function resolveConversationFileEndpointCapability(input: {
   }
 
   if (platform === 'gemini') {
-    if (endpoint === 'responses') {
-      return {
-        image: 'native',
-        audio: 'native',
-        document: 'native',
-        preservesRemoteDocumentUrl: true,
-      };
-    }
     if (endpoint === 'chat') {
       return {
         image: 'native',

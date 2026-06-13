@@ -9,7 +9,7 @@ import type {
 import { mergeChatUsageDetails } from './helpers.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object';
+  return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
 function pushUniqueAnnotation(
@@ -30,7 +30,13 @@ type ChoiceAggregate = {
   role?: 'assistant';
   content: string[];
   reasoning: string[];
-  toolCalls: Array<{ id: string; name: string; arguments: string }>;
+  reasoningSignature?: string;
+  toolCalls: Array<{
+    id: string;
+    name: string;
+    arguments: string;
+    thoughtSignature?: string;
+  }>;
   finishReason: string | null;
   annotations: Array<Record<string, unknown>>;
   annotationUrls: Set<string>;
@@ -49,6 +55,7 @@ function createChoiceAggregate(index: number): ChoiceAggregate {
     role: undefined,
     content: [],
     reasoning: [],
+    reasoningSignature: undefined,
     toolCalls: [],
     finishReason: null,
     annotations: [],
@@ -69,10 +76,11 @@ function applyChoiceDelta(choice: ChoiceAggregate, event: OpenAiChatChoiceDelta)
   if (event.role) choice.role = event.role;
   if (event.contentDelta) choice.content.push(event.contentDelta);
   if (event.reasoningDelta) choice.reasoning.push(event.reasoningDelta);
+  if (event.reasoningSignature) choice.reasoningSignature = event.reasoningSignature;
   if (event.finishReason !== undefined) choice.finishReason = event.finishReason ?? null;
   if (Array.isArray(event.toolCallDeltas)) {
     for (const delta of event.toolCallDeltas) {
-      if (!delta.id && !delta.name && !delta.argumentsDelta) continue;
+      if (!delta.id && !delta.name && !delta.argumentsDelta && !delta.thoughtSignature) continue;
       const index = Number.isFinite(delta.index) ? Math.max(0, Math.trunc(delta.index)) : choice.toolCalls.length;
       while (choice.toolCalls.length <= index) {
         choice.toolCalls.push({ id: '', name: '', arguments: '' });
@@ -81,6 +89,7 @@ function applyChoiceDelta(choice: ChoiceAggregate, event: OpenAiChatChoiceDelta)
       if (delta.id) existing.id = delta.id;
       if (delta.name) existing.name = delta.name;
       if (delta.argumentsDelta) existing.arguments += delta.argumentsDelta;
+      if (delta.thoughtSignature) existing.thoughtSignature = delta.thoughtSignature;
     }
   }
   if (Array.isArray(event.annotations)) {
@@ -116,6 +125,7 @@ export function applyOpenAiChatStreamEvent(
       role: event.role,
       contentDelta: event.contentDelta,
       reasoningDelta: event.reasoningDelta,
+      reasoningSignature: event.reasoningSignature,
       toolCallDeltas: event.toolCallDeltas,
       finishReason: event.finishReason,
       annotations: event.annotations,
@@ -155,7 +165,10 @@ export function finalizeOpenAiChatAggregate(
       ...(choice.role ? { role: choice.role } : {}),
       content: choice.content.join(''),
       reasoningContent: choice.reasoning.join(''),
-      toolCalls: choice.toolCalls.filter((item) => item.id || item.name || item.arguments),
+      ...(choice.reasoningSignature ? { reasoningSignature: choice.reasoningSignature } : {}),
+      toolCalls: choice.toolCalls.filter(
+        (item) => item.id || item.name || item.arguments || item.thoughtSignature,
+      ),
       finishReason: choice.finishReason || (choice.toolCalls.length > 0 ? 'tool_calls' : 'stop'),
       ...(choice.annotations.length > 0 ? { annotations: choice.annotations } : {}),
       ...(choice.citations.size > 0 ? { citations: Array.from(choice.citations).sort() } : {}),
@@ -169,6 +182,7 @@ export function finalizeOpenAiChatAggregate(
     ...normalized,
     content: primaryChoice?.content || normalized.content,
     reasoningContent: primaryChoice?.reasoningContent || normalized.reasoningContent,
+    reasoningSignature: primaryChoice?.reasoningSignature || normalized.reasoningSignature,
     finishReason: primaryChoice?.finishReason || normalized.finishReason,
     toolCalls: primaryChoice?.toolCalls?.length ? primaryChoice.toolCalls : normalized.toolCalls,
     annotations: primaryChoice?.annotations?.length ? primaryChoice.annotations : normalized.annotations,

@@ -47,6 +47,8 @@ describe('openAiRequestBridge', () => {
         promptCacheKey: 'cache-1',
         turnState: 'turn-state-1',
       },
+    }, {
+      preserveResponsesExtensions: true,
     });
 
     expect(body).toMatchObject({
@@ -92,5 +94,84 @@ describe('openAiRequestBridge', () => {
       'https://example.com/bird.png',
       'https://example.com/fish.png',
     ]);
+  });
+
+  it('preserves Responses-only generation fields without emitting them into Chat bodies', () => {
+    const request = canonicalRequestFromOpenAiBody({
+      body: {
+        model: 'gpt-5',
+        messages: [{ role: 'user', content: 'hello' }],
+        max_tool_calls: 3,
+        prompt_cache_retention: { scope: 'workspace' },
+        background: 'true',
+        truncation: 'auto',
+      },
+      surface: 'openai-chat',
+    });
+
+    expect(request.generation).toMatchObject({
+      maxToolCalls: 3,
+      promptCacheRetention: { scope: 'workspace' },
+      background: true,
+      truncation: 'auto',
+    });
+
+    const chatBody = canonicalRequestToOpenAiChatBody(request);
+    expect(chatBody.max_tool_calls).toBeUndefined();
+    expect(chatBody.prompt_cache_retention).toBeUndefined();
+    expect(chatBody.background).toBeUndefined();
+    expect(chatBody.truncation).toBeUndefined();
+
+    const responsesCompatibleBody = canonicalRequestToOpenAiChatBody(request, {
+      preserveResponsesExtensions: true,
+    });
+    expect(responsesCompatibleBody).toMatchObject({
+      max_tool_calls: 3,
+      prompt_cache_retention: { scope: 'workspace' },
+      background: true,
+      truncation: 'auto',
+    });
+  });
+
+  it('serializes Responses custom tools and allowed tool choices to Chat schema', () => {
+    const request = canonicalRequestFromOpenAiBody({
+      body: {
+        model: 'gpt-5',
+        messages: [{ role: 'user', content: 'browse' }],
+        tools: [{
+          type: 'custom',
+          name: 'browser',
+          description: 'browse the web',
+          format: { type: 'grammar', syntax: 'lark' },
+        }],
+        tool_choice: {
+          type: 'allowed_tools',
+          mode: 'required',
+          tools: [{ type: 'custom', name: 'browser' }],
+        },
+      },
+      surface: 'openai-responses',
+    });
+
+    expect(canonicalRequestToOpenAiChatBody(request)).toMatchObject({
+      tools: [{
+        type: 'custom',
+        custom: {
+          name: 'browser',
+          description: 'browse the web',
+          format: { type: 'grammar', syntax: 'lark' },
+        },
+      }],
+      tool_choice: {
+        type: 'allowed_tools',
+        allowed_tools: {
+          mode: 'required',
+          tools: [{
+            type: 'custom',
+            custom: { name: 'browser' },
+          }],
+        },
+      },
+    });
   });
 });

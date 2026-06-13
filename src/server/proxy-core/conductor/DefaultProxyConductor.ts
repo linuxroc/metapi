@@ -8,6 +8,19 @@ import {
 import type { ExecuteInput, ExecuteResult, ProxyConductorDependencies, SelectedChannelLike } from './types.js';
 import { recordFailedAttempt, recordSuccessfulAttempt } from './usageHooks.js';
 
+const DEFAULT_MAX_ATTEMPTS = 32;
+const DEFAULT_MAX_SAME_CHANNEL_RETRIES = 1;
+
+function normalizePositiveLimit(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value)) return fallback;
+  return Math.max(1, Math.trunc(value));
+}
+
+function normalizeRetryLimit(value: number | undefined, fallback: number): number {
+  if (value === undefined || !Number.isFinite(value)) return fallback;
+  return Math.max(0, Math.trunc(value));
+}
+
 export class DefaultProxyConductor {
   constructor(private readonly deps: ProxyConductorDependencies) {}
 
@@ -20,7 +33,13 @@ export class DefaultProxyConductor {
 
   async execute(input: ExecuteInput): Promise<ExecuteResult> {
     const excludeChannelIds: number[] = [];
+    const maxAttempts = normalizePositiveLimit(input.maxAttempts, DEFAULT_MAX_ATTEMPTS);
+    const maxSameChannelRetries = normalizeRetryLimit(
+      input.maxSameChannelRetries,
+      DEFAULT_MAX_SAME_CHANNEL_RETRIES,
+    );
     let attempts = 0;
+    let sameChannelRetries = 0;
     let selected = await this.deps.selectChannel(input.requestedModel, input.downstreamPolicy);
     if (!selected) {
       return {
@@ -73,7 +92,21 @@ export class DefaultProxyConductor {
       }
 
       if (shouldRetrySameChannel(action)) {
-        continue;
+        if (sameChannelRetries < maxSameChannelRetries && attempts < maxAttempts) {
+          sameChannelRetries += 1;
+          continue;
+        }
+      }
+
+      if (attempts >= maxAttempts) {
+        return {
+          ok: false,
+          reason: 'failed',
+          selected,
+          status: result.status,
+          rawErrorText: result.rawErrorText,
+          attempts,
+        };
       }
 
       if (shouldRefreshAuth(action) && this.deps.refreshAuth) {
@@ -87,7 +120,7 @@ export class DefaultProxyConductor {
         }
       }
 
-      if (shouldFailover(action)) {
+      if (shouldFailover(action) || shouldRetrySameChannel(action)) {
         excludeChannelIds.push(selected.channel.id);
         const next = await this.deps.selectNextChannel(
           input.requestedModel,
@@ -105,6 +138,7 @@ export class DefaultProxyConductor {
           };
         }
         selected = next;
+        sameChannelRetries = 0;
         continue;
       }
 

@@ -26,3 +26,5 @@ docker/.env
 docs/plan/
 docs/plans/
 .ace-tool/
+.kiro/
+.vscode/

@@ -14,6 +14,7 @@ import type {
   CanonicalContentPart,
   CanonicalCliProfile,
   CanonicalContinuation,
+  CanonicalGenerationConfig,
   CanonicalMessage,
   CanonicalMessageRole,
   CanonicalOperation,
@@ -87,6 +88,104 @@ function safeJsonStringify(value: unknown): string {
   }
 }
 
+function toFiniteNumber(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value !== 'string' || !value.trim()) return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function toFiniteInteger(value: unknown): number | undefined {
+  const numberValue = toFiniteNumber(value);
+  return numberValue === undefined ? undefined : Math.trunc(numberValue);
+}
+
+function toBooleanLike(value: unknown): boolean | undefined {
+  if (typeof value === 'boolean') return value;
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'true') return true;
+  if (normalized === 'false') return false;
+  return undefined;
+}
+
+function normalizeStringList(value: unknown): string[] | undefined {
+  const values = typeof value === 'string' ? [value] : value;
+  if (!Array.isArray(values)) return undefined;
+  const normalized = values
+    .map((item) => asTrimmedString(item))
+    .filter((item) => item.length > 0);
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function normalizeNumericRecord(value: unknown): Record<string, number> | undefined {
+  if (!isRecord(value)) return undefined;
+  const normalized = Object.fromEntries(
+    Object.entries(value)
+      .map(([key, item]) => [key, toFiniteNumber(item)] as const)
+      .filter((entry): entry is readonly [string, number] => entry[1] !== undefined),
+  );
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
+function canonicalGenerationFromOpenAiBody(
+  body: Record<string, unknown>,
+): CanonicalGenerationConfig | undefined {
+  const maxOutputTokens = (
+    toFiniteInteger(body.max_output_tokens)
+    ?? toFiniteInteger(body.max_completion_tokens)
+    ?? toFiniteInteger(body.max_tokens)
+  );
+  const maxToolCalls = toFiniteInteger(body.max_tool_calls);
+  const temperature = toFiniteNumber(body.temperature);
+  const topP = toFiniteNumber(body.top_p);
+  const topK = toFiniteNumber(body.top_k);
+  const stopSequences = normalizeStringList(body.stop ?? body.stop_sequences);
+  const modalities = normalizeStringList(body.modalities);
+  const audio = isRecord(body.audio) ? cloneJsonValue(body.audio) : undefined;
+  const serviceTier = asTrimmedString(body.service_tier) || undefined;
+  const topLogprobs = toFiniteInteger(body.top_logprobs);
+  const logitBias = normalizeNumericRecord(body.logit_bias);
+  const safetyIdentifier = asTrimmedString(body.safety_identifier) || undefined;
+  const user = asTrimmedString(body.user) || undefined;
+  const verbosity = asTrimmedString(body.verbosity) || undefined;
+  const streamOptions = isRecord(body.stream_options) ? body.stream_options : null;
+  const streamOptionsIncludeUsage = typeof streamOptions?.include_usage === 'boolean'
+    ? streamOptions.include_usage
+    : undefined;
+  const background = toBooleanLike(body.background);
+
+  const generation: CanonicalGenerationConfig = {
+    ...(maxOutputTokens !== undefined && maxOutputTokens > 0 ? { maxOutputTokens } : {}),
+    ...(maxToolCalls !== undefined ? { maxToolCalls } : {}),
+    ...(temperature !== undefined ? { temperature } : {}),
+    ...(topP !== undefined ? { topP } : {}),
+    ...(topK !== undefined ? { topK } : {}),
+    ...(stopSequences ? { stopSequences } : {}),
+    ...(body.response_format !== undefined
+      ? { responseFormat: cloneJsonValue(body.response_format) }
+      : {}),
+    ...(modalities ? { modalities } : {}),
+    ...(audio ? { audio } : {}),
+    ...(serviceTier ? { serviceTier } : {}),
+    ...(topLogprobs !== undefined ? { topLogprobs } : {}),
+    ...(logitBias ? { logitBias } : {}),
+    ...(safetyIdentifier ? { safetyIdentifier } : {}),
+    ...(user ? { user } : {}),
+    ...(verbosity ? { verbosity } : {}),
+    ...(streamOptionsIncludeUsage !== undefined ? { streamOptionsIncludeUsage } : {}),
+    ...(body.prompt_cache_retention !== undefined
+      ? { promptCacheRetention: cloneJsonValue(body.prompt_cache_retention) }
+      : {}),
+    ...(background !== undefined ? { background } : {}),
+    ...(body.truncation !== undefined
+      ? { truncation: cloneJsonValue(body.truncation) }
+      : {}),
+  };
+
+  return Object.keys(generation).length > 0 ? generation : undefined;
+}
+
 function joinNonEmpty(parts: string[]): string {
   return parts
     .map((part) => part.trim())
@@ -150,6 +249,25 @@ function openAiContentToCanonicalParts(content: unknown): CanonicalContentPart[]
           ...(attachment.filename ? { filename: attachment.filename } : {}),
         });
       }
+      continue;
+    }
+    if (type === 'input_audio') {
+      const audio = isRecord(item.input_audio) ? item.input_audio : item;
+      const data = asTrimmedString(audio.data);
+      if (!data) continue;
+      const format = asTrimmedString(audio.format);
+      const mimeType = asTrimmedString(audio.mime_type ?? audio.mimeType)
+        || (
+          format === 'mp3'
+            ? 'audio/mpeg'
+            : (format ? `audio/${format}` : 'audio/wav')
+        );
+      parts.push({
+        type: 'audio',
+        data,
+        ...(format ? { format } : {}),
+        mimeType,
+      });
       continue;
     }
   }
@@ -225,16 +343,17 @@ function parseTools(rawTools: unknown): CanonicalTool[] | undefined {
       if (!isRecord(item)) return [];
       const itemType = asTrimmedString(item.type).toLowerCase();
 
-      if (itemType === 'function' && isRecord(item.function)) {
-        const name = asTrimmedString(item.function.name);
+      if (itemType === 'function') {
+        const rawFunction = isRecord(item.function) ? item.function : item;
+        const name = asTrimmedString(rawFunction.name);
         if (!name) return [];
         return [{
           name,
-          ...(asTrimmedString(item.function.description)
-            ? { description: asTrimmedString(item.function.description) }
+          ...(asTrimmedString(rawFunction.description)
+            ? { description: asTrimmedString(rawFunction.description) }
             : {}),
-          ...(typeof item.function.strict === 'boolean' ? { strict: item.function.strict } : {}),
-          ...(isRecord(item.function.parameters) ? { inputSchema: cloneJsonValue(item.function.parameters) } : {}),
+          ...(typeof rawFunction.strict === 'boolean' ? { strict: rawFunction.strict } : {}),
+          ...(isRecord(rawFunction.parameters) ? { inputSchema: cloneJsonValue(rawFunction.parameters) } : {}),
         }];
       }
 
@@ -296,10 +415,15 @@ export function canonicalRequestFromOpenAiBody(
 
   for (const rawMessage of rawMessages) {
     if (!isRecord(rawMessage)) continue;
-    const role = normalizeRole(rawMessage.role);
+    const rawRole = asTrimmedString(rawMessage.role).toLowerCase();
+    const role = rawRole === 'function' ? 'tool' : normalizeRole(rawMessage.role);
 
     if (role === 'tool') {
-      const toolCallId = asTrimmedString(rawMessage.tool_call_id ?? rawMessage.id);
+      const toolCallId = asTrimmedString(
+        rawMessage.tool_call_id
+        ?? rawMessage.id
+        ?? (rawRole === 'function' ? rawMessage.name : undefined),
+      );
       const rawContent = rawMessage.content;
       const resultText = typeof rawContent === 'string'
         ? rawContent
@@ -324,7 +448,16 @@ export function canonicalRequestFromOpenAiBody(
     if (role === 'assistant') {
       appendAssistantReasoningPart(parts, rawMessage);
     }
-    const toolCalls = Array.isArray(rawMessage.tool_calls) ? rawMessage.tool_calls : [];
+    const legacyFunctionCall = isRecord(rawMessage.function_call)
+      ? [{
+        id: asTrimmedString(rawMessage.function_call.name) || `tool_${parts.length}`,
+        type: 'function',
+        function: rawMessage.function_call,
+      }]
+      : [];
+    const toolCalls = Array.isArray(rawMessage.tool_calls)
+      ? rawMessage.tool_calls
+      : legacyFunctionCall;
     for (const toolCall of toolCalls) {
       if (!isRecord(toolCall)) continue;
       const fn = isRecord(toolCall.function) ? toolCall.function : {};
@@ -339,6 +472,10 @@ export function canonicalRequestFromOpenAiBody(
         id: id || `tool_${parts.length}`,
         name,
         argumentsJson,
+        ...(isRecord(toolCall.provider_specific_fields)
+          && asTrimmedString(toolCall.provider_specific_fields.thought_signature)
+          ? { thoughtSignature: asTrimmedString(toolCall.provider_specific_fields.thought_signature) }
+          : {}),
       });
     }
 
@@ -361,12 +498,28 @@ export function canonicalRequestFromOpenAiBody(
   });
 
   const continuation = readOpenAiCompatibleContinuation(body, input.continuation);
+  const generation = canonicalGenerationFromOpenAiBody(body);
+  const legacyTools = Array.isArray(body.functions)
+    ? body.functions
+      .filter((item) => isRecord(item))
+      .map((item) => ({
+        type: 'function',
+        function: cloneJsonValue(item),
+      }))
+    : undefined;
+  const tools = parseTools(body.tools ?? legacyTools);
+  const legacyFunctionCall = isRecord(body.function_call)
+    ? {
+      type: 'function',
+      function: {
+        name: body.function_call.name,
+      },
+    }
+    : body.function_call;
+  const toolChoice = parseToolChoice(body.tool_choice ?? legacyFunctionCall);
 
   const passthrough = {
     ...(input.passthrough ?? {}),
-    ...(typeof body.parallel_tool_calls === 'boolean'
-      ? { parallel_tool_calls: body.parallel_tool_calls }
-      : {}),
     ...(reasoningResult.metadata ? { transformerMetadata: reasoningResult.metadata } : {}),
   };
 
@@ -378,8 +531,12 @@ export function canonicalRequestFromOpenAiBody(
     stream: body.stream === true,
     messages,
     ...(reasoningResult.reasoning ? { reasoning: reasoningResult.reasoning } : {}),
-    ...(parseTools(body.tools) ? { tools: parseTools(body.tools) } : {}),
-    ...(parseToolChoice(body.tool_choice) !== undefined ? { toolChoice: parseToolChoice(body.tool_choice) } : {}),
+    ...(generation ? { generation } : {}),
+    ...(tools ? { tools } : {}),
+    ...(toolChoice !== undefined ? { toolChoice } : {}),
+    ...(typeof body.parallel_tool_calls === 'boolean'
+      ? { parallelToolCalls: body.parallel_tool_calls }
+      : {}),
     ...(continuation ? { continuation } : {}),
     ...(metadata ? { metadata } : {}),
     ...(attachments ? { attachments } : {}),
@@ -427,6 +584,20 @@ function canonicalPartsToOpenAiContent(
       contentBlocks.push(toOpenAiChatFileBlock(normalizedFile));
       continue;
     }
+    if (part.type === 'audio') {
+      const mimeSubtype = asTrimmedString(part.mimeType).split('/')[1] || '';
+      const format = part.format
+        || (mimeSubtype === 'mpeg' ? 'mp3' : mimeSubtype)
+        || 'wav';
+      contentBlocks.push({
+        type: 'input_audio',
+        input_audio: {
+          data: part.data,
+          format,
+        },
+      });
+      continue;
+    }
     if (part.type === 'tool_call') {
       toolCalls.push({
         id: part.id,
@@ -435,6 +606,9 @@ function canonicalPartsToOpenAiContent(
           name: part.name,
           arguments: part.argumentsJson,
         },
+        ...(part.thoughtSignature
+          ? { provider_specific_fields: { thought_signature: part.thoughtSignature } }
+          : {}),
       });
       continue;
     }
@@ -484,8 +658,123 @@ function canonicalToolChoiceToOpenAi(toolChoice: CanonicalToolChoice | undefined
   };
 }
 
+function extractCustomToolDefinition(
+  raw: Record<string, unknown>,
+): Record<string, unknown> | null {
+  const nestedCustom = isRecord(raw.custom) ? raw.custom : null;
+  const name = asTrimmedString(nestedCustom?.name ?? raw.name);
+  if (!name) return null;
+  return {
+    ...(nestedCustom ? cloneJsonValue(nestedCustom) : {}),
+    name,
+    ...(!nestedCustom && asTrimmedString(raw.description)
+      ? { description: asTrimmedString(raw.description) }
+      : {}),
+    ...(!nestedCustom && raw.format !== undefined
+      ? { format: cloneJsonValue(raw.format) }
+      : {}),
+  };
+}
+
+function canonicalToolToOpenAiTarget(
+  tool: CanonicalTool,
+  preserveResponsesExtensions: boolean,
+): Record<string, unknown> | null {
+  if (!('raw' in tool)) {
+    return {
+      type: 'function',
+      function: {
+        name: tool.name,
+        ...(tool.description ? { description: tool.description } : {}),
+        ...(typeof tool.strict === 'boolean' ? { strict: tool.strict } : {}),
+        parameters: cloneJsonValue(tool.inputSchema ?? { type: 'object' }),
+      },
+    };
+  }
+
+  const raw = cloneJsonValue(tool.raw) as Record<string, unknown>;
+  const type = asTrimmedString(raw.type || tool.type).toLowerCase();
+  if (type === 'custom') {
+    const custom = extractCustomToolDefinition(raw);
+    if (!custom) return null;
+    return preserveResponsesExtensions
+      ? { type: 'custom', ...custom }
+      : { type: 'custom', custom };
+  }
+  if (!preserveResponsesExtensions || !type) return null;
+  raw.type = type;
+  return raw;
+}
+
+function normalizeRawToolChoiceForOpenAiTarget(
+  value: string | Record<string, unknown>,
+  preserveResponsesExtensions: boolean,
+): unknown {
+  if (!isRecord(value)) return value;
+  const type = asTrimmedString(value.type).toLowerCase();
+  if (type === 'custom') {
+    const custom = extractCustomToolDefinition(value);
+    if (!custom) return undefined;
+    return preserveResponsesExtensions
+      ? { type: 'custom', name: custom.name }
+      : { type: 'custom', custom: { name: custom.name } };
+  }
+  if (type !== 'allowed_tools') {
+    return preserveResponsesExtensions ? cloneJsonValue(value) : undefined;
+  }
+
+  const allowedTools = isRecord(value.allowed_tools) ? value.allowed_tools : value;
+  const tools = Array.isArray(allowedTools.tools)
+    ? allowedTools.tools
+      .map((tool): Record<string, unknown> | null => {
+        if (!isRecord(tool)) return null;
+        const toolType = asTrimmedString(tool.type).toLowerCase();
+        if (toolType === 'function') {
+          const name = asTrimmedString(
+            (isRecord(tool.function) ? tool.function.name : undefined) ?? tool.name,
+          );
+          if (!name) return null;
+          return preserveResponsesExtensions
+            ? { type: 'function', name }
+            : { type: 'function', function: { name } };
+        }
+        if (toolType === 'custom') {
+          const custom = extractCustomToolDefinition(tool);
+          if (!custom) return null;
+          return preserveResponsesExtensions
+            ? { type: 'custom', name: custom.name }
+            : { type: 'custom', custom: { name: custom.name } };
+        }
+        return null;
+      })
+      .filter((tool): tool is Record<string, unknown> => tool !== null)
+    : [];
+  if (tools.length === 0) return undefined;
+  const normalized = {
+    mode: asTrimmedString(allowedTools.mode).toLowerCase() === 'required' ? 'required' : 'auto',
+    tools,
+  };
+  return preserveResponsesExtensions
+    ? { type: 'allowed_tools', ...normalized }
+    : { type: 'allowed_tools', allowed_tools: normalized };
+}
+
+function canonicalToolChoiceToOpenAiTarget(
+  toolChoice: CanonicalToolChoice | undefined,
+  preserveResponsesExtensions: boolean,
+): unknown {
+  if (toolChoice && typeof toolChoice === 'object' && toolChoice.type === 'raw') {
+    return normalizeRawToolChoiceForOpenAiTarget(
+      toolChoice.value,
+      preserveResponsesExtensions,
+    );
+  }
+  return canonicalToolChoiceToOpenAi(toolChoice);
+}
+
 export function canonicalRequestToOpenAiChatBody(
   request: CanonicalRequestEnvelope,
+  options: { preserveResponsesExtensions?: boolean } = {},
 ): Record<string, unknown> {
   const messages: Array<Record<string, unknown>> = [];
 
@@ -532,6 +821,49 @@ export function canonicalRequestToOpenAiChatBody(
   if (request.reasoning?.effort) body.reasoning_effort = request.reasoning.effort;
   if (request.reasoning?.budgetTokens !== undefined) body.reasoning_budget = request.reasoning.budgetTokens;
   if (request.reasoning?.summary) body.reasoning_summary = request.reasoning.summary;
+  if (request.generation?.maxOutputTokens !== undefined) {
+    body.max_completion_tokens = request.generation.maxOutputTokens;
+  }
+  if (request.generation?.temperature !== undefined) body.temperature = request.generation.temperature;
+  if (request.generation?.topP !== undefined) body.top_p = request.generation.topP;
+  if (request.generation?.topK !== undefined) body.top_k = request.generation.topK;
+  if (request.generation?.stopSequences) body.stop = cloneJsonValue(request.generation.stopSequences);
+  if (request.generation?.responseFormat !== undefined) {
+    body.response_format = cloneJsonValue(request.generation.responseFormat);
+  }
+  if (request.generation?.modalities) body.modalities = cloneJsonValue(request.generation.modalities);
+  if (request.generation?.audio) body.audio = cloneJsonValue(request.generation.audio);
+  if (request.generation?.serviceTier) body.service_tier = request.generation.serviceTier;
+  if (request.generation?.topLogprobs !== undefined) {
+    body.logprobs = true;
+    body.top_logprobs = request.generation.topLogprobs;
+  }
+  if (request.generation?.logitBias) body.logit_bias = cloneJsonValue(request.generation.logitBias);
+  if (request.generation?.safetyIdentifier) body.safety_identifier = request.generation.safetyIdentifier;
+  if (request.generation?.user) body.user = request.generation.user;
+  if (request.generation?.verbosity) body.verbosity = request.generation.verbosity;
+  if (request.generation?.streamOptionsIncludeUsage !== undefined) {
+    body.stream_options = {
+      include_usage: request.generation.streamOptionsIncludeUsage,
+    };
+  }
+  if (options.preserveResponsesExtensions) {
+    if (request.generation?.maxToolCalls !== undefined) {
+      body.max_tool_calls = request.generation.maxToolCalls;
+    }
+    if (request.generation?.promptCacheRetention !== undefined) {
+      body.prompt_cache_retention = cloneJsonValue(request.generation.promptCacheRetention);
+    }
+    if (request.generation?.background !== undefined) {
+      body.background = request.generation.background;
+    }
+    if (request.generation?.truncation !== undefined) {
+      body.truncation = cloneJsonValue(request.generation.truncation);
+    }
+  }
+  if (typeof request.parallelToolCalls === 'boolean') {
+    body.parallel_tool_calls = request.parallelToolCalls;
+  }
   const transformerMetadata = isRecord(request.passthrough?.transformerMetadata)
     ? request.passthrough.transformerMetadata as Record<string, unknown>
     : null;
@@ -544,40 +876,45 @@ export function canonicalRequestToOpenAiChatBody(
     ...(request.reasoning?.includeEncryptedContent ? ['reasoning.encrypted_content'] : []),
     ...passthroughInclude,
   ].filter((item, index, all) => all.indexOf(item) === index);
-  if (mergedInclude.length > 0) body.include = mergedInclude;
+  if (options.preserveResponsesExtensions && mergedInclude.length > 0) {
+    body.include = mergedInclude;
+  }
   const metadata = isRecord(request.metadata)
     ? cloneJsonValue(request.metadata)
     : {};
   applyOpenAiCompatibleContinuation(body, request.continuation, metadata);
+  if (!options.preserveResponsesExtensions) {
+    delete body.previous_response_id;
+  }
   if (Array.isArray(request.attachments) && request.attachments.length > 0) {
     body.attachments = cloneJsonValue(request.attachments);
   }
   if (Array.isArray(request.tools) && request.tools.length > 0) {
-    body.tools = request.tools.map((tool) => {
-      if ('raw' in tool) {
-        const raw = cloneJsonValue(tool.raw) as Record<string, unknown>;
-        if (typeof raw.type !== 'string' || raw.type.trim().length === 0) {
-          raw.type = tool.type;
-        }
-        return raw;
-      }
-      return {
-        type: 'function',
-        function: {
-          name: tool.name,
-          ...(tool.description ? { description: tool.description } : {}),
-          ...(typeof tool.strict === 'boolean' ? { strict: tool.strict } : {}),
-          parameters: cloneJsonValue(tool.inputSchema ?? { type: 'object' }),
-        },
-      };
-    });
+    body.tools = request.tools
+      .map((tool) => canonicalToolToOpenAiTarget(
+        tool,
+        options.preserveResponsesExtensions === true,
+      ))
+      .filter((tool): tool is Record<string, unknown> => !!tool);
+    if ((body.tools as unknown[]).length === 0) {
+      delete body.tools;
+    }
   }
-  const toolChoice = canonicalToolChoiceToOpenAi(request.toolChoice);
-  if (toolChoice !== undefined) body.tool_choice = toolChoice;
+  const toolChoice = canonicalToolChoiceToOpenAiTarget(
+    request.toolChoice,
+    options.preserveResponsesExtensions === true,
+  );
+  if (toolChoice !== undefined && Array.isArray(body.tools) && body.tools.length > 0) {
+    body.tool_choice = toolChoice;
+  }
 
   if (isRecord(request.passthrough)) {
     for (const [key, value] of Object.entries(request.passthrough)) {
-      if (key === 'transformerMetadata' || body[key] !== undefined) continue;
+      if (
+        key === 'transformerMetadata'
+        || key === 'parallel_tool_calls'
+        || body[key] !== undefined
+      ) continue;
       body[key] = cloneJsonValue(value);
     }
   }

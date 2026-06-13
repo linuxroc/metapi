@@ -12,6 +12,12 @@ import {
 import { mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import {
+  ADMIN_SESSION_COOKIE,
+  createAdminSession,
+  isValidAdminSession,
+  resetAdminSessionsForTests,
+} from '../../services/adminSessionService.js';
 
 type ConfigModule = typeof import('../../config.js');
 type RateLimitModule = typeof import('../../middleware/requestRateLimit.js');
@@ -56,6 +62,7 @@ describe('POST /api/auth/login', () => {
     config.cloudflareTurnstileSecret = '';
     config.adminIpAllowlist = [];
     resetRequestRateLimitStore();
+    resetAdminSessionsForTests();
   });
 
   afterEach(() => {
@@ -81,9 +88,31 @@ describe('POST /api/auth/login', () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ success: true });
+    expect(response.json()).toMatchObject({
+      success: true,
+      sessionToken: expect.any(String),
+      expiresAt: expect.any(Number),
+    });
     // No Turnstile call when the feature is off.
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('revokes bearer and cookie sessions on logout', async () => {
+    const bearerSession = createAdminSession();
+    const cookieSession = createAdminSession();
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/auth/logout',
+      headers: {
+        authorization: `Bearer ${bearerSession.token}`,
+        cookie: `${ADMIN_SESSION_COOKIE}=${cookieSession.token}`,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(isValidAdminSession(bearerSession.token)).toBe(false);
+    expect(isValidAdminSession(cookieSession.token)).toBe(false);
+    expect(response.headers['set-cookie']).toContain('Max-Age=0');
   });
 
   it('trims whitespace from the submitted admin token before comparing', async () => {
@@ -94,7 +123,10 @@ describe('POST /api/auth/login', () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ success: true });
+    expect(response.json()).toMatchObject({
+      success: true,
+      sessionToken: expect.any(String),
+    });
   });
 
   it('returns 400 when the admin token is missing or blank', async () => {
@@ -163,7 +195,10 @@ describe('POST /api/auth/login', () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ success: true });
+    expect(response.json()).toMatchObject({
+      success: true,
+      sessionToken: expect.any(String),
+    });
   });
 
   it('rejects invalid admin token before checking Turnstile when allowlist denies the request', async () => {
@@ -200,7 +235,10 @@ describe('POST /api/auth/login', () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ success: true });
+    expect(response.json()).toMatchObject({
+      success: true,
+      sessionToken: expect.any(String),
+    });
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -216,7 +254,10 @@ describe('POST /api/auth/login', () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ success: true });
+    expect(response.json()).toMatchObject({
+      success: true,
+      sessionToken: expect.any(String),
+    });
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -328,7 +369,10 @@ describe('POST /api/auth/login', () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ success: true });
+    expect(response.json()).toMatchObject({
+      success: true,
+      sessionToken: expect.any(String),
+    });
 
     // The verify call should have included secret and response fields.
     const [, calledInit] = fetchSpy.mock.calls[0] as [string, RequestInit];

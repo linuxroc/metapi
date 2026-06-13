@@ -45,6 +45,8 @@ describe('anthropic messages request bridge', () => {
         sessionId: 'session-claude-1',
         turnState: 'turn-state-claude-1',
       },
+    }, {
+      defaultMaxTokens: 8_192,
     });
 
     expect(body).toMatchObject({
@@ -52,6 +54,63 @@ describe('anthropic messages request bridge', () => {
       metadata: {
         user_id: 'session-claude-1',
         metapi_turn_state: 'turn-state-claude-1',
+      },
+    });
+  });
+
+  it('round-trips Anthropic structured output through the canonical contract', () => {
+    const parsed = parseAnthropicMessagesRequestToCanonical({
+      model: 'claude-sonnet-4-5',
+      max_tokens: 256,
+      messages: [{ role: 'user', content: 'return weather JSON' }],
+      output_config: {
+        format: {
+          type: 'json_schema',
+          schema: {
+            type: 'object',
+            properties: {
+              temperature: { type: 'number' },
+            },
+            required: ['temperature'],
+          },
+        },
+      },
+    });
+
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.value?.generation?.responseFormat).toEqual({
+      type: 'json_schema',
+      json_schema: {
+        name: 'response',
+        schema: {
+          type: 'object',
+          properties: {
+            temperature: { type: 'number' },
+          },
+          required: ['temperature'],
+        },
+      },
+    });
+
+    const body = buildCanonicalRequestToAnthropicMessagesBody({
+      ...parsed.value!,
+      reasoning: {
+        effort: 'high',
+      },
+    }, {
+      defaultMaxTokens: 8_192,
+    });
+    expect(body.output_config).toEqual({
+      effort: 'high',
+      format: {
+        type: 'json_schema',
+        schema: {
+          type: 'object',
+          properties: {
+            temperature: { type: 'number' },
+          },
+          required: ['temperature'],
+        },
       },
     });
   });

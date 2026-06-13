@@ -66,6 +66,17 @@ describe('buildConfig', () => {
     expect(config.codexResponsesWebsocketBeta).toBe('responses_websockets=2099-01-01');
   });
 
+  it('uses a configurable Anthropic max token fallback', () => {
+    expect(buildConfig({}).anthropicDefaultMaxTokens).toBe(8_192);
+    expect(buildConfig({ ANTHROPIC_DEFAULT_MAX_TOKENS: '32768' }).anthropicDefaultMaxTokens).toBe(32_768);
+    expect(buildConfig({ ANTHROPIC_DEFAULT_MAX_TOKENS: '0' }).anthropicDefaultMaxTokens).toBe(1);
+  });
+
+  it('fails empty upstream output by default while allowing an explicit opt-out', () => {
+    expect(buildConfig({}).proxyEmptyContentFailEnabled).toBe(true);
+    expect(buildConfig({ PROXY_EMPTY_CONTENT_FAIL: 'false' }).proxyEmptyContentFailEnabled).toBe(false);
+  });
+
   it('accepts JSON request bodies larger than Fastify default 1 MiB', async () => {
     const app = Fastify(buildFastifyOptions(buildConfig({})));
     const largeText = 'a'.repeat(2 * 1024 * 1024);
@@ -86,8 +97,29 @@ describe('buildConfig', () => {
     await app.close();
   });
 
-  it('trusts forwarded client IP headers for reverse-proxy deployments', async () => {
+  it('does not trust forwarded client IP headers by default', async () => {
     const app = Fastify(buildFastifyOptions(buildConfig({})));
+
+    app.get('/ip', async (request) => ({
+      ip: request.ip,
+    }));
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/ip',
+      remoteAddress: '10.0.0.8',
+      headers: {
+        'x-forwarded-for': '203.0.113.5, 10.0.0.8',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ ip: '10.0.0.8' });
+    await app.close();
+  });
+
+  it('trusts forwarded client IP headers when explicitly configured', async () => {
+    const app = Fastify(buildFastifyOptions(buildConfig({ TRUST_PROXY: 'true' })));
 
     app.get('/ip', async (request) => ({
       ip: request.ip,

@@ -1,3 +1,5 @@
+import { normalizeSessionIdentifier } from '../../../contracts/sessionIdentifier.js';
+
 /**
  * Protocol-pure helper for extracting the OpenAI Responses protocol-level
  * continuation identifier from an already parsed downstream request body.
@@ -31,8 +33,5 @@ export function extractOpenAiResponsesSessionId(parsedBody: unknown): string | n
   }
 
   const raw = (parsedBody as { previous_response_id?: unknown }).previous_response_id;
-  if (typeof raw !== 'string') return null;
-
-  const trimmed = raw.trim();
-  return trimmed.length > 0 ? trimmed : null;
+  return normalizeSessionIdentifier(raw);
 }

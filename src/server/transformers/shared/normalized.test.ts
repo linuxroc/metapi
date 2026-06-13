@@ -583,6 +583,12 @@ describe('shared normalized helpers', () => {
     expect(normalizeStopReason('max_output_tokens')).toBe('length');
     expect(normalizeStopReason('tool_use')).toBe('tool_calls');
     expect(normalizeStopReason('completed')).toBe('stop');
+    expect(normalizeStopReason('SAFETY')).toBe('content_filter');
+    expect(normalizeStopReason('MALFORMED_FUNCTION_CALL')).toBe('error');
+    expect(normalizeStopReason('UNEXPECTED_TOOL_CALL')).toBe('error');
+    expect(normalizeStopReason('MAX_SAFETY_RISK')).toBe('content_filter');
+    expect(normalizeStopReason('MAXIMUM_CONTEXT')).toBeNull();
+    expect(normalizeStopReason('TOOL_ERROR')).toBeNull();
     expect(normalizeStopReason('mystery')).toBeNull();
   });
 });

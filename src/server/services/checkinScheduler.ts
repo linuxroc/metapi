@@ -1,5 +1,5 @@
 import cron from 'node-cron';
-import { eq } from 'drizzle-orm';
+import { and, eq, gte, inArray, lt } from 'drizzle-orm';
 import { config } from '../config.js';
 import { db, schema } from '../db/index.js';
 import { refreshAllBalances } from './balanceService.js';
@@ -9,8 +9,12 @@ import { sendNotification } from './notifyService.js';
 import { buildDailySummaryNotification, collectDailySummaryMetrics } from './dailySummaryService.js';
 import { cleanupConfiguredLogs } from './logCleanupService.js';
 import { normalizeLogCleanupRetentionDays } from '../shared/logCleanupRetentionDays.js';
-
-export type CheckinScheduleMode = 'cron' | 'interval';
+import {
+  CHECKIN_RANDOM_WINDOW_LABEL,
+  isCheckinScheduleMode,
+  type CheckinScheduleMode,
+} from '../shared/checkinSchedule.js';
+import { getLocalDayRangeUtc } from './localTimeService.js';
 
 let checkinTask: cron.ScheduledTask | null = null;
 let checkinIntervalTimer: ReturnType<typeof setInterval> | null = null;
@@ -22,6 +26,17 @@ const intervalAttemptByAccount = new Map<number, number>();
 const DAILY_SUMMARY_DEFAULT_CRON = '58 23 * * *';
 const LOG_CLEANUP_DEFAULT_CRON = '0 6 * * *';
 const CHECKIN_INTERVAL_POLL_MS = 60_000;
+const CHECKIN_RANDOM_WINDOW_POLL_MS = 60_000;
+const CHECKIN_RANDOM_WINDOW_START_MINUTE = 8 * 60;
+const CHECKIN_RANDOM_WINDOW_END_MINUTE = 22 * 60 + 30;
+
+type RandomWindowCheckinSchedule = {
+  dateKey: string;
+  runAtMs: number;
+};
+
+const randomWindowScheduleByAccount = new Map<number, RandomWindowCheckinSchedule>();
+const randomWindowInFlightAccountIds = new Set<number>();
 
 async function resolveJsonSetting<T>(
   settingKey: string,
@@ -75,6 +90,83 @@ type IntervalCheckinCandidate = {
   lastCheckinAt?: string | null;
 };
 
+type RandomWindowCheckinCandidate = IntervalCheckinCandidate;
+
+function pad2(value: number): string {
+  return String(value).padStart(2, '0');
+}
+
+function localDateKey(date: Date): string {
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+}
+
+function addLocalDays(date: Date, days: number): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate() + days, 0, 0, 0, 0);
+}
+
+function localMinuteDate(date: Date, minuteOfDay: number): Date {
+  const hours = Math.floor(minuteOfDay / 60);
+  const minutes = minuteOfDay % 60;
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate(), hours, minutes, 0, 0);
+}
+
+function roundUpToMinuteMs(value: number): number {
+  return Math.ceil(value / 60_000) * 60_000;
+}
+
+function clampRandom(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(1, Math.max(0, value));
+}
+
+function randomMinuteBetween(startMs: number, endMs: number, random: () => number): number {
+  const minuteCount = Math.floor((endMs - startMs) / 60_000) + 1;
+  const offset = Math.min(minuteCount - 1, Math.floor(clampRandom(random()) * minuteCount));
+  return startMs + offset * 60_000;
+}
+
+export function createRandomWindowCheckinRunAt(now = new Date(), random: () => number = Math.random): Date {
+  const todayStartMs = localMinuteDate(now, CHECKIN_RANDOM_WINDOW_START_MINUTE).getTime();
+  const todayEndMs = localMinuteDate(now, CHECKIN_RANDOM_WINDOW_END_MINUTE).getTime();
+  const earliestTodayMs = Math.max(todayStartMs, roundUpToMinuteMs(now.getTime()));
+
+  if (earliestTodayMs <= todayEndMs) {
+    return new Date(randomMinuteBetween(earliestTodayMs, todayEndMs, random));
+  }
+
+  const tomorrow = addLocalDays(now, 1);
+  return createRandomWindowCheckinRunAtForDate(tomorrow, random);
+}
+
+export function createRandomWindowCheckinRunAtForDate(date: Date, random: () => number = Math.random): Date {
+  const startMs = localMinuteDate(date, CHECKIN_RANDOM_WINDOW_START_MINUTE).getTime();
+  const endMs = localMinuteDate(date, CHECKIN_RANDOM_WINDOW_END_MINUTE).getTime();
+  return new Date(randomMinuteBetween(startMs, endMs, random));
+}
+
+function createRandomWindowSchedule(now: Date, random: () => number): RandomWindowCheckinSchedule {
+  const runAt = createRandomWindowCheckinRunAt(now, random);
+  return {
+    dateKey: localDateKey(runAt),
+    runAtMs: runAt.getTime(),
+  };
+}
+
+function createNextDayRandomWindowSchedule(now: Date, random: () => number): RandomWindowCheckinSchedule {
+  const runAt = createRandomWindowCheckinRunAtForDate(addLocalDays(now, 1), random);
+  return {
+    dateKey: localDateKey(runAt),
+    runAtMs: runAt.getTime(),
+  };
+}
+
+function parseLastCheckinDateKey(value?: string | null): string | null {
+  if (!value) return null;
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime())) return null;
+  return localDateKey(parsed);
+}
+
 export function selectDueIntervalCheckinAccountIds(
   rows: IntervalCheckinCandidate[],
   intervalHours: number,
@@ -99,6 +191,69 @@ export function selectDueIntervalCheckinAccountIds(
       return true;
     })
     .map((row) => row.id);
+}
+
+export function selectDueRandomWindowCheckinAccountIds(
+  rows: RandomWindowCheckinCandidate[],
+  now = new Date(),
+  scheduleState = randomWindowScheduleByAccount,
+  random: () => number = Math.random,
+) {
+  const nowMs = now.getTime();
+  const todayKey = localDateKey(now);
+  const activeIds = new Set(rows.map((row) => row.id));
+  const dueAccountIds: number[] = [];
+
+  for (const accountId of Array.from(scheduleState.keys())) {
+    if (!activeIds.has(accountId)) {
+      scheduleState.delete(accountId);
+    }
+  }
+
+  for (const row of rows) {
+    const lastCheckinDateKey = parseLastCheckinDateKey(row.lastCheckinAt);
+    let schedule = scheduleState.get(row.id);
+
+    if (lastCheckinDateKey === todayKey) {
+      if (!schedule || schedule.dateKey <= todayKey) {
+        scheduleState.set(row.id, createNextDayRandomWindowSchedule(now, random));
+      }
+      continue;
+    }
+
+    if (!schedule || schedule.dateKey < todayKey) {
+      schedule = createRandomWindowSchedule(now, random);
+      scheduleState.set(row.id, schedule);
+    }
+
+    if (schedule.dateKey === todayKey && schedule.runAtMs <= nowMs) {
+      dueAccountIds.push(row.id);
+    }
+  }
+
+  return dueAccountIds;
+}
+
+async function collectTodayFailedCheckinAccountIds(accountIds: number[], now = new Date()): Promise<Set<number>> {
+  const uniqueAccountIds = Array.from(new Set(accountIds));
+  if (uniqueAccountIds.length === 0) return new Set<number>();
+
+  const { startUtc, endUtc } = getLocalDayRangeUtc(now);
+  const rows = await db
+    .select()
+    .from(schema.checkinLogs)
+    .where(and(
+      inArray(schema.checkinLogs.accountId, uniqueAccountIds),
+      eq(schema.checkinLogs.status, 'failed'),
+      gte(schema.checkinLogs.createdAt, startUtc),
+      lt(schema.checkinLogs.createdAt, endUtc),
+    ))
+    .all();
+
+  const failedAccountIds = rows
+    .map((row: any) => row?.checkin_logs?.accountId ?? row?.accountId)
+    .filter((accountId: unknown): accountId is number => typeof accountId === 'number');
+  return new Set<number>(failedAccountIds);
 }
 
 async function runIntervalCheckinPass(now = new Date()) {
@@ -138,6 +293,59 @@ async function runIntervalCheckinPass(now = new Date()) {
   }
 }
 
+async function runRandomWindowCheckinPass(now = new Date()) {
+  const rows = await db
+    .select()
+    .from(schema.accounts)
+    .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+    .all();
+
+  const candidates = rows
+    .filter((row: any) => row.accounts?.checkinEnabled === true && row.accounts?.status === 'active' && row.sites?.status !== 'disabled')
+    .map((row: any) => ({
+      id: row.accounts.id,
+      lastCheckinAt: row.accounts.lastCheckinAt,
+    }));
+
+  const todayFailedAccountIds = await collectTodayFailedCheckinAccountIds(
+    candidates.map((candidate) => candidate.id),
+    now,
+  );
+  const todayKey = localDateKey(now);
+  for (const accountId of todayFailedAccountIds) {
+    const schedule = randomWindowScheduleByAccount.get(accountId);
+    if (!schedule || schedule.dateKey <= todayKey) {
+      randomWindowScheduleByAccount.set(accountId, createNextDayRandomWindowSchedule(now, Math.random));
+    }
+  }
+
+  const dueAccountIds = selectDueRandomWindowCheckinAccountIds(candidates, now)
+    .filter((accountId) => !todayFailedAccountIds.has(accountId) && !randomWindowInFlightAccountIds.has(accountId));
+  if (dueAccountIds.length === 0) return;
+
+  try {
+    for (const accountId of dueAccountIds) {
+      randomWindowInFlightAccountIds.add(accountId);
+    }
+    const results = await checkinAll({
+      accountIds: dueAccountIds,
+      scheduleMode: 'random',
+    });
+    for (const accountId of dueAccountIds) {
+      randomWindowScheduleByAccount.set(accountId, createNextDayRandomWindowSchedule(now, Math.random));
+    }
+    const success = results.filter((r) => r.result.success).length;
+    const failed = results.length - success;
+    console.log(`[Scheduler] Random-window check-in complete: ${success} success, ${failed} failed`);
+  } catch (err) {
+    console.error('[Scheduler] Random-window check-in error:', err);
+  } finally {
+    for (const accountId of dueAccountIds) {
+      randomWindowInFlightAccountIds.delete(accountId);
+    }
+  }
+}
+
 function stopCheckinSchedule() {
   checkinTask?.stop();
   checkinTask = null;
@@ -153,6 +361,13 @@ function startCheckinSchedule() {
     checkinIntervalTimer = setInterval(() => {
       void runIntervalCheckinPass();
     }, CHECKIN_INTERVAL_POLL_MS);
+    return;
+  }
+  if (config.checkinScheduleMode === 'random') {
+    checkinIntervalTimer = setInterval(() => {
+      void runRandomWindowCheckinPass();
+    }, CHECKIN_RANDOM_WINDOW_POLL_MS);
+    void runRandomWindowCheckinPass();
     return;
   }
   checkinTask = createCheckinTask(config.checkinCron);
@@ -215,7 +430,7 @@ export async function startScheduler() {
   const activeCheckinCron = await resolveCronSetting('checkin_cron', config.checkinCron);
   const activeCheckinScheduleMode = await resolveJsonSetting<CheckinScheduleMode>(
     'checkin_schedule_mode',
-    (value): value is CheckinScheduleMode => value === 'cron' || value === 'interval',
+    isCheckinScheduleMode,
     config.checkinScheduleMode as CheckinScheduleMode,
   );
   const activeCheckinIntervalHours = await resolvePositiveIntegerSetting(
@@ -255,7 +470,12 @@ export async function startScheduler() {
   dailySummaryTask = createDailySummaryTask(activeDailySummaryCron);
   logCleanupTask = createLogCleanupTask(activeLogCleanupCron);
 
-  console.log(`[Scheduler] Check-in schedule: ${config.checkinScheduleMode} (${config.checkinScheduleMode === 'cron' ? activeCheckinCron : `${config.checkinIntervalHours}h`})`);
+  const checkinScheduleDetail = config.checkinScheduleMode === 'cron'
+    ? activeCheckinCron
+    : config.checkinScheduleMode === 'interval'
+      ? `${config.checkinIntervalHours}h`
+      : `random ${CHECKIN_RANDOM_WINDOW_LABEL}`;
+  console.log(`[Scheduler] Check-in schedule: ${config.checkinScheduleMode} (${checkinScheduleDetail})`);
   console.log(`[Scheduler] Balance refresh cron: ${activeBalanceCron}`);
   console.log(`[Scheduler] Daily summary cron: ${activeDailySummaryCron}`);
   console.log(
@@ -277,7 +497,7 @@ export function updateCheckinSchedule(input: {
   intervalHours?: number;
 }) {
   const nextMode = input.mode;
-  if (nextMode !== 'cron' && nextMode !== 'interval') {
+  if (!isCheckinScheduleMode(nextMode)) {
     throw new Error(`Invalid checkin schedule mode: ${String(nextMode)}`);
   }
 
@@ -331,4 +551,10 @@ export function __resetCheckinSchedulerForTests() {
   dailySummaryTask = null;
   logCleanupTask = null;
   intervalAttemptByAccount.clear();
+  randomWindowScheduleByAccount.clear();
+  randomWindowInFlightAccountIds.clear();
+}
+
+export function __runRandomWindowCheckinPassForTests(now = new Date()) {
+  return runRandomWindowCheckinPass(now);
 }

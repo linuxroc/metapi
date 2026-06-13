@@ -133,6 +133,11 @@ Metapi 当前有三类主要配置入口：
 | `DATA_DIR` | 数据目录（SQLite 数据库存储位置） | `./data` |
 | `TZ` | 时区 | `Asia/Shanghai` |
 | `ACCOUNT_CREDENTIAL_SECRET` | 账号凭证加密密钥（用于加密存储的上游账号密码） | 默认使用 `AUTH_TOKEN` |
+| `ANTHROPIC_DEFAULT_MAX_TOKENS` | OpenAI 风格请求降级到 Anthropic Messages 且未指定 token 上限时使用的默认值 | `8192` |
+| `TRUST_PROXY` | 是否信任反向代理传入的客户端 IP；仅在受控反向代理后启用 | `false` |
+| `PROXY_EMPTY_CONTENT_FAIL` | 是否把无文本、工具、reasoning 或多模态输出的响应判为失败 | `true` |
+
+> 公网直连部署不要开启 `TRUST_PROXY`。只有当前置反向代理会覆盖并清理客户端传入的转发头时，才设置为 `true`。
 
 ### 2. OAuth 与 Provider 登录
 

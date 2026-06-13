@@ -95,6 +95,7 @@ describe('openai chat response bridge', () => {
         id: 'call_1',
         name: 'lookup_weather',
         arguments: '{"city":"Shanghai"}',
+        thoughtSignature: 'gemini-tool-signature',
       }],
     };
 
@@ -122,6 +123,9 @@ describe('openai chat response bridge', () => {
               name: 'lookup_weather',
               arguments: '{"city":"Shanghai"}',
             },
+            provider_specific_fields: {
+              thought_signature: 'gemini-tool-signature',
+            },
           }],
         },
       }],
@@ -143,6 +147,9 @@ describe('openai chat response bridge', () => {
               name: 'lookup_weather',
               arguments: '{"city":"Shanghai"}',
             },
+            provider_specific_fields: {
+              thought_signature: 'gemini-tool-signature',
+            },
           }],
         },
       }],
@@ -151,6 +158,34 @@ describe('openai chat response bridge', () => {
       choices: [{
         index: 0,
         finish_reason: 'tool_calls',
+      }],
+    });
+  });
+
+  it('preserves reasoning signatures through final payloads and synthetic chunks', () => {
+    const normalized = {
+      id: 'chatcmpl-signature-1',
+      model: 'gpt-5',
+      created: 123,
+      content: 'done',
+      reasoningContent: 'plan',
+      reasoningSignature: 'metapi:anthropic-signature:sig-1',
+      finishReason: 'stop',
+      toolCalls: [],
+    };
+
+    expect(buildNormalizedFinalToOpenAiChatPayload(normalized as any)).toMatchObject({
+      choices: [{
+        message: {
+          reasoning_signature: 'metapi:anthropic-signature:sig-1',
+        },
+      }],
+    });
+    expect(buildNormalizedFinalToOpenAiChatChunks(normalized as any)[0]).toMatchObject({
+      choices: [{
+        delta: {
+          reasoning_signature: 'metapi:anthropic-signature:sig-1',
+        },
       }],
     });
   });

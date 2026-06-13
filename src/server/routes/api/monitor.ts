@@ -5,8 +5,14 @@ import { config } from '../../config.js';
 import { eq } from 'drizzle-orm';
 import { createRateLimitGuard } from '../../middleware/requestRateLimit.js';
 import { parseMonitorConfigPayload } from '../../contracts/supportRoutePayloads.js';
+import {
+  buildAdminSessionCookie,
+  createAdminSession,
+  isValidAdminSession,
+} from '../../services/adminSessionService.js';
 
 const MONITOR_AUTH_COOKIE = 'meta_monitor_auth';
+const MONITOR_SESSION_TTL_MS = 2 * 60 * 60 * 1000;
 const LDOH_BASE_URL = 'https://ldoh.105117.xyz';
 const LDOH_COOKIE_SETTING_KEY = 'monitor_ldoh_cookie';
 
@@ -112,7 +118,7 @@ function rewriteLocationHeader(location: string | null): string | null {
 
 function ensureMonitorAuth(request: FastifyRequest, reply: FastifyReply): boolean {
   const cookies = parseCookies(request.headers.cookie);
-  if (cookies[MONITOR_AUTH_COOKIE] !== config.authToken) {
+  if (!isValidAdminSession(cookies[MONITOR_AUTH_COOKIE], Date.now(), 'monitor')) {
     reply.code(401).send({ error: 'Missing or invalid monitor session' });
     return false;
   }
@@ -167,11 +173,18 @@ export async function monitorRoutes(app: FastifyInstance) {
     },
   );
 
-  app.post('/api/monitor/session', { preHandler: [limitMonitorSession] }, async (_, reply) => {
+  app.post('/api/monitor/session', { preHandler: [limitMonitorSession] }, async (request, reply) => {
+    const session = createAdminSession(Date.now(), {
+      scope: 'monitor',
+      ttlMs: MONITOR_SESSION_TTL_MS,
+    });
     // HttpOnly cookie for iframe proxy auth within current origin.
     reply.header(
       'Set-Cookie',
-      `${MONITOR_AUTH_COOKIE}=${config.authToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=7200`,
+      buildAdminSessionCookie(session.token, request.protocol === 'https', {
+        name: MONITOR_AUTH_COOKIE,
+        maxAgeSeconds: MONITOR_SESSION_TTL_MS / 1000,
+      }),
     );
     return { success: true };
   });

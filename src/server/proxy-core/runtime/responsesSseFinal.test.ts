@@ -5,6 +5,24 @@ import { Response } from 'undici';
 import { collectResponsesFinalPayloadFromSse } from './responsesSseFinal.js';
 
 describe('collectResponsesFinalPayloadFromSse', () => {
+  it('rejects array payloads for terminal Responses SSE events', async () => {
+    const upstream = {
+      async text() {
+        return [
+          'event: response.completed',
+          'data: []',
+          '',
+          'data: [DONE]',
+          '',
+        ].join('\n');
+      },
+    };
+
+    await expect(collectResponsesFinalPayloadFromSse(upstream, 'gpt-5.4'))
+      .rejects
+      .toThrow('invalid response.completed SSE payload');
+  });
+
   it('treats event:error payloads as upstream failures', async () => {
     const upstream = {
       async text() {

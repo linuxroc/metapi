@@ -42,6 +42,7 @@ describe('siteApiKeyMigrationService insert boundary', () => {
   });
 
   afterAll(async () => {
+    await (await import('../db/index.js')).closeDbConnections();
     if (dataDir) {
       rmSync(dataDir, { recursive: true, force: true });
     }

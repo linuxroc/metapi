@@ -148,7 +148,7 @@ describe('resolveUpstreamEndpointCandidates', () => {
       'gpt-5.3',
       'openai',
     );
-    expect(openaiOrder).toEqual(['responses', 'chat', 'messages']);
+    expect(openaiOrder).toEqual(['chat', 'responses']);
 
     const openaiResponsesOrder = await resolveUpstreamEndpointCandidates(
       {
@@ -158,7 +158,7 @@ describe('resolveUpstreamEndpointCandidates', () => {
       'gpt-5.3',
       'responses',
     );
-    expect(openaiResponsesOrder).toEqual(['responses', 'chat', 'messages']);
+    expect(openaiResponsesOrder).toEqual(['responses', 'chat']);
 
     const openaiClaudeOrder = await resolveUpstreamEndpointCandidates(
       {
@@ -168,7 +168,7 @@ describe('resolveUpstreamEndpointCandidates', () => {
       'claude-opus-4-6',
       'openai',
     );
-    expect(openaiClaudeOrder).toEqual(['responses', 'chat', 'messages']);
+    expect(openaiClaudeOrder).toEqual(['chat', 'responses']);
 
     const antigravityOrder = await resolveUpstreamEndpointCandidates(
       {
@@ -178,7 +178,7 @@ describe('resolveUpstreamEndpointCandidates', () => {
       'claude-opus-4-6',
       'openai',
     );
-    expect(antigravityOrder).toEqual(['messages']);
+    expect(antigravityOrder).toEqual(['chat']);
 
     const claudeOrder = await resolveUpstreamEndpointCandidates(
       {
@@ -215,7 +215,7 @@ describe('resolveUpstreamEndpointCandidates', () => {
       },
     );
 
-    expect(order).toEqual(['responses', 'chat', 'messages']);
+    expect(order).toEqual(['responses', 'chat']);
   });
 
   it('derives responses-only candidates for compact requests before surface fallback logic', async () => {
@@ -587,6 +587,58 @@ describe('resolveUpstreamEndpointCandidates', () => {
     expect(order).toEqual(['responses', 'chat', 'messages']);
   });
 
+  it('does not treat generic invalid requests as endpoint capability failures', async () => {
+    const memoryWrite = recordUpstreamEndpointFailure({
+      siteId: baseContext.site.id,
+      endpoint: 'responses',
+      downstreamFormat: 'responses',
+      modelName: 'gpt-5.3',
+      status: 400,
+      errorText: '{"error":{"message":"temperature must be between 0 and 2","type":"invalid_request_error","param":"temperature"}}',
+    });
+    expect(memoryWrite).toBeNull();
+
+    const order = await resolveUpstreamEndpointCandidates(
+      {
+        ...baseContext,
+        site: { ...baseContext.site, platform: 'new-api' },
+      },
+      'gpt-5.3',
+      'responses',
+    );
+
+    expect(order).toEqual(['responses', 'chat', 'messages']);
+  });
+
+  it('does not block an endpoint when HTTP 404 identifies a missing model or resource', async () => {
+    expect(recordUpstreamEndpointFailure({
+      siteId: baseContext.site.id,
+      endpoint: 'responses',
+      downstreamFormat: 'responses',
+      modelName: 'gpt-5.3',
+      status: 404,
+      errorText: '{"error":{"message":"model not found","type":"invalid_request_error","code":"not_found"}}',
+    })).toBeNull();
+
+    expect(recordUpstreamEndpointFailure({
+      siteId: baseContext.site.id,
+      endpoint: 'responses',
+      downstreamFormat: 'responses',
+      modelName: 'gpt-5.3',
+      status: 404,
+      errorText: '{"error":{"message":"file not found","type":"not_found_error","code":"not_found"}}',
+    })).toBeNull();
+
+    expect(await resolveUpstreamEndpointCandidates(
+      {
+        ...baseContext,
+        site: { ...baseContext.site, platform: 'new-api' },
+      },
+      'gpt-5.3',
+      'responses',
+    )).toEqual(['responses', 'chat', 'messages']);
+  });
+
   it('learns a better endpoint from explicit upstream protocol errors', async () => {
     const memoryWrite = recordUpstreamEndpointFailure({
       siteId: baseContext.site.id,
@@ -671,7 +723,7 @@ describe('resolveUpstreamEndpointCandidates', () => {
     expect(order).toEqual(['responses', 'messages']);
   });
 
-  it('keeps openai platform responses-first even when the catalog only advertises generic openai/chat support', async () => {
+  it('keeps openai platform chat-first when the catalog advertises generic openai/chat support', async () => {
     fetchModelPricingCatalogMock.mockResolvedValue({
       models: [
         {
@@ -691,7 +743,7 @@ describe('resolveUpstreamEndpointCandidates', () => {
       'openai',
     );
 
-    expect(order).toEqual(['responses', 'chat', 'messages']);
+    expect(order).toEqual(['chat', 'responses']);
   });
 
   it('keeps anyrouter messages-first special case', async () => {
@@ -743,13 +795,14 @@ describe('resolveUpstreamEndpointCandidates', () => {
     expect(order).toEqual(['responses', 'messages', 'chat']);
   });
 
-  it('treats endpoint-not-found responses as downgrade candidates', () => {
-    expect(isEndpointDowngradeError(404, '{"error":{"message":"Not Found","type":"not_found_error"}}')).toBe(true);
+  it('requires endpoint-specific evidence before treating client errors as downgrade candidates', () => {
+    expect(isEndpointDowngradeError(404, '{"error":{"message":"Not Found","type":"not_found_error"}}')).toBe(false);
+    expect(isEndpointDowngradeError(404, '{"error":{"message":"endpoint not found: /v1/responses","type":"not_found_error"}}')).toBe(true);
     expect(isEndpointDowngradeError(405, '{"error":{"message":"Method Not Allowed"}}')).toBe(true);
     expect(isEndpointDowngradeError(400, '{"error":{"message":"unsupported endpoint","type":"invalid_request_error"}}')).toBe(true);
     expect(isEndpointDowngradeError(400, '{"error":{"message":"","type":"upstream_error"}}')).toBe(false);
     expect(isEndpointDowngradeError(400, '{"error":{"message":"upstream_error: unsupported endpoint /v1/responses","type":"upstream_error"}}')).toBe(true);
-    expect(isEndpointDowngradeError(400, '{"error":{"message":"openai_error","type":"bad_response_status_code"}}')).toBe(true);
+    expect(isEndpointDowngradeError(400, '{"error":{"message":"openai_error","type":"bad_response_status_code"}}')).toBe(false);
     expect(isEndpointDowngradeError(415, '{"error":{"message":"Unsupported Media Type: Only \\"application/json\\" is allowed"}}')).toBe(true);
   });
 
@@ -2389,7 +2442,7 @@ describe('buildUpstreamEndpointRequest', () => {
     ]);
   });
 
-  it('drops Responses-only tools when /v1/responses falls back to /v1/chat/completions', () => {
+  it('serializes Chat-compatible tools when /v1/responses falls back to /v1/chat/completions', () => {
     const request = buildUpstreamEndpointRequest({
       endpoint: 'chat',
       modelName: 'gpt-5.4',
@@ -2457,9 +2510,19 @@ describe('buildUpstreamEndpointRequest', () => {
             },
           },
         },
+        {
+          type: 'custom',
+          custom: {
+            name: 'browser',
+            format: { type: 'text' },
+          },
+        },
       ],
     });
-    expect(request.body.tool_choice).toBeUndefined();
+    expect(request.body.tool_choice).toEqual({
+      type: 'custom',
+      custom: { name: 'browser' },
+    });
   });
 
   it('preserves Anthropic image and tool_result blocks instead of flattening to plain text', () => {

@@ -303,6 +303,7 @@ services:
     environment:
       AUTH_TOKEN: ${AUTH_TOKEN:?AUTH_TOKEN is required}
       PROXY_TOKEN: ${PROXY_TOKEN:?PROXY_TOKEN is required}
+      CHECKIN_SCHEDULE_MODE: "random"
       CHECKIN_CRON: "0 8 * * *"
       BALANCE_REFRESH_CRON: "0 * * * *"
       PORT: ${PORT:-4000}

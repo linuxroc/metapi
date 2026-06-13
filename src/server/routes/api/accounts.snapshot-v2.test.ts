@@ -47,6 +47,7 @@ describe("accounts snapshot v2", () => {
 
   afterAll(async () => {
     await app.close();
+    await (await import("../../db/index.js")).closeDbConnections();
     if (previousDataDir === undefined) {
       delete process.env.DATA_DIR;
     } else {

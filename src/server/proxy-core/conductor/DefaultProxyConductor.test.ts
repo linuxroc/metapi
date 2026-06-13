@@ -90,6 +90,89 @@ describe('DefaultProxyConductor', () => {
     });
   });
 
+  it('fails over after the same-channel retry budget is exhausted', async () => {
+    const nextSelectedChannel = {
+      ...baseSelectedChannel,
+      channel: { id: 12, routeId: 22 },
+      tokenValue: 'sk-next',
+    };
+    const selectNextChannel = vi.fn().mockResolvedValue(nextSelectedChannel);
+    const conductor = new DefaultProxyConductor({
+      selectChannel: vi.fn().mockResolvedValue(baseSelectedChannel),
+      selectNextChannel,
+      recordSuccess: vi.fn().mockResolvedValue(undefined),
+      recordFailure: vi.fn().mockResolvedValue(undefined),
+    });
+    const attempt = vi.fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        action: 'retry_same_channel',
+        status: 503,
+        rawErrorText: 'temporarily unavailable',
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        action: 'retry_same_channel',
+        status: 503,
+        rawErrorText: 'still unavailable',
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        response: new Response('ok', { status: 200 }),
+      });
+
+    const result = await conductor.execute({
+      requestedModel: 'gpt-5.4',
+      attempt,
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      selected: nextSelectedChannel,
+      attempts: 3,
+    });
+    expect(attempt.mock.calls[0]?.[0].selected).toBe(baseSelectedChannel);
+    expect(attempt.mock.calls[1]?.[0].selected).toBe(baseSelectedChannel);
+    expect(attempt.mock.calls[2]?.[0].selected).toBe(nextSelectedChannel);
+    expect(selectNextChannel).toHaveBeenCalledWith('gpt-5.4', [11], undefined);
+  });
+
+  it('stops when the total attempt budget is exhausted', async () => {
+    const refreshAuth = vi.fn().mockResolvedValue(baseSelectedChannel);
+    const selectNextChannel = vi.fn();
+    const conductor = new DefaultProxyConductor({
+      selectChannel: vi.fn().mockResolvedValue(baseSelectedChannel),
+      selectNextChannel,
+      refreshAuth,
+      recordSuccess: vi.fn().mockResolvedValue(undefined),
+      recordFailure: vi.fn().mockResolvedValue(undefined),
+    });
+    const attempt = vi.fn().mockResolvedValue({
+      ok: false,
+      action: 'refresh_auth',
+      status: 401,
+      rawErrorText: 'expired token',
+    });
+
+    const result = await conductor.execute({
+      requestedModel: 'gpt-5.4',
+      maxAttempts: 2,
+      attempt,
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      reason: 'failed',
+      selected: baseSelectedChannel,
+      status: 401,
+      rawErrorText: 'expired token',
+      attempts: 2,
+    });
+    expect(attempt).toHaveBeenCalledTimes(2);
+    expect(refreshAuth).toHaveBeenCalledTimes(1);
+    expect(selectNextChannel).not.toHaveBeenCalled();
+  });
+
   it('fails over to the next channel when the attempt asks for failover', async () => {
     const nextSelectedChannel = {
       ...baseSelectedChannel,

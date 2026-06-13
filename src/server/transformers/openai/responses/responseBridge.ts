@@ -6,7 +6,7 @@ import { decodeOpenAiEncryptedReasoning } from '../../shared/reasoningTransport.
 import { decodeResponsesMcpCompatToolCall } from './mcpCompatibility.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object';
+  return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
 function asTrimmedString(value: unknown): string {
@@ -362,6 +362,13 @@ export function buildNormalizedFinalToOpenAiResponsesPayload(input: {
     : '';
   const encryptedReasoning = decodeOpenAiEncryptedReasoning(rawReasoningSignature)
     ?? (rawReasoningSignature && !rawReasoningSignature.startsWith('metapi:') ? rawReasoningSignature : null);
+  const transportedReasoningSignature = (
+    rawReasoningSignature
+    && rawReasoningSignature.startsWith('metapi:')
+    && !encryptedReasoning
+  )
+    ? rawReasoningSignature
+    : null;
   const annotations = extractAnnotationsFromUpstream(upstreamPayload);
 
   const output: Array<Record<string, unknown>> = syntheticOutput.map((item) => cloneJson(item));
@@ -378,7 +385,7 @@ export function buildNormalizedFinalToOpenAiResponsesPayload(input: {
     );
   });
 
-  if ((normalized.reasoningContent || encryptedReasoning) && !hasReasoningItem) {
+  if ((normalized.reasoningContent || encryptedReasoning || transportedReasoningSignature) && !hasReasoningItem) {
     const reasoningItem: Record<string, unknown> = {
       id: ensureMessageId(`${normalizedId}_reasoning`),
       type: 'reasoning',
@@ -392,6 +399,9 @@ export function buildNormalizedFinalToOpenAiResponsesPayload(input: {
     };
     if (encryptedReasoning) {
       reasoningItem.encrypted_content = encryptedReasoning;
+    }
+    if (transportedReasoningSignature) {
+      reasoningItem.reasoning_signature = transportedReasoningSignature;
     }
     output.push(reasoningItem);
   }

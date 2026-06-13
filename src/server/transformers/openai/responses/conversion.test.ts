@@ -566,9 +566,11 @@ describe('convertOpenAiBodyToResponsesBody', () => {
         tools: [
           {
             type: 'custom',
-            name: 'browser',
-            description: 'browse the web',
-            format: { type: 'text' },
+            custom: {
+              name: 'browser',
+              description: 'browse the web',
+              format: { type: 'text' },
+            },
           },
           {
             type: 'image_generation',
@@ -576,6 +578,13 @@ describe('convertOpenAiBodyToResponsesBody', () => {
             size: '1024x1024',
           },
         ],
+        tool_choice: {
+          type: 'allowed_tools',
+          allowed_tools: {
+            mode: 'required',
+            tools: [{ type: 'custom', custom: { name: 'browser' } }],
+          },
+        },
       },
       'gpt-5',
       false,
@@ -604,6 +613,11 @@ describe('convertOpenAiBodyToResponsesBody', () => {
           size: '1024x1024',
         },
       ],
+      tool_choice: {
+        type: 'allowed_tools',
+        mode: 'required',
+        tools: [{ type: 'custom', name: 'browser' }],
+      },
     });
   });
 
@@ -635,15 +649,13 @@ describe('convertOpenAiBodyToResponsesBody', () => {
       text: {
         format: {
           type: 'json_schema',
-          json_schema: {
-            name: 'payload',
-            schema: {
-              type: 'object',
-              properties: {
-                name: { type: 'string' },
-              },
-              required: ['name'],
+          name: 'payload',
+          schema: {
+            type: 'object',
+            properties: {
+              name: { type: 'string' },
             },
+            required: ['name'],
           },
         },
         verbosity: 'high',
@@ -1240,6 +1252,21 @@ describe('convertOpenAiBodyToResponsesBody', () => {
 });
 
 describe('convertResponsesBodyToOpenAiBody', () => {
+  it('maps Responses output limits to the current Chat token field', () => {
+    const result = convertResponsesBodyToOpenAiBody(
+      {
+        model: 'gpt-5',
+        input: 'hello',
+        max_output_tokens: 256,
+      },
+      'gpt-5',
+      false,
+    );
+
+    expect(result.max_completion_tokens).toBe(256);
+    expect(result.max_tokens).toBeUndefined();
+  });
+
   it('maps Responses input_file blocks back into OpenAI chat file blocks', () => {
     const result = convertResponsesBodyToOpenAiBody(
       {
@@ -1286,7 +1313,7 @@ describe('convertResponsesBodyToOpenAiBody', () => {
     ]);
   });
 
-  it('preserves richer Responses request fields back onto the OpenAI-compatible body', () => {
+  it('forwards only Chat-compatible fields and tools from Responses requests', () => {
     const result = convertResponsesBodyToOpenAiBody(
       {
         model: 'gpt-5',
@@ -1295,7 +1322,7 @@ describe('convertResponsesBodyToOpenAiBody', () => {
         max_tool_calls: 4,
         prompt_cache_key: 'prompt-key-2',
         prompt_cache_retention: { scope: 'project' },
-        stream_options: { include_obfuscation: true },
+        stream_options: { include_usage: true, include_obfuscation: true },
         background: true,
         text: { format: { type: 'json_object' }, verbosity: 'high' },
         tools: [
@@ -1311,6 +1338,11 @@ describe('convertResponsesBodyToOpenAiBody', () => {
             output_format: 'png',
           },
         ],
+        tool_choice: {
+          type: 'allowed_tools',
+          mode: 'required',
+          tools: [{ type: 'custom', name: 'browser' }],
+        },
       },
       'gpt-5',
       true,
@@ -1320,26 +1352,29 @@ describe('convertResponsesBodyToOpenAiBody', () => {
       model: 'gpt-5',
       stream: true,
       safety_identifier: 'safe-user-3',
-      max_tool_calls: 4,
       prompt_cache_key: 'prompt-key-2',
-      prompt_cache_retention: { scope: 'project' },
-      stream_options: { include_obfuscation: true },
-      background: true,
+      stream_options: { include_usage: true },
       verbosity: 'high',
       tools: [
         {
           type: 'custom',
-          name: 'browser',
-          format: { type: 'grammar', syntax: 'lark' },
-        },
-        {
-          type: 'image_generation',
-          background: 'transparent',
-          partial_images: 2,
-          output_format: 'png',
+          custom: {
+            name: 'browser',
+            format: { type: 'grammar', syntax: 'lark' },
+          },
         },
       ],
+      tool_choice: {
+        type: 'allowed_tools',
+        allowed_tools: {
+          mode: 'required',
+          tools: [{ type: 'custom', custom: { name: 'browser' } }],
+        },
+      },
     });
+    expect(result.max_tool_calls).toBeUndefined();
+    expect(result.prompt_cache_retention).toBeUndefined();
+    expect(result.background).toBeUndefined();
   });
 
   it('converts custom tool calls and outputs into OpenAI-compatible tool messages', () => {
@@ -1481,7 +1516,7 @@ describe('convertResponsesBodyToOpenAiBody', () => {
     expect(roundTripped.input).toEqual(source.input);
   });
 
-  it('preserves remaining request fields needed for OpenAI-compatible downstream fallback', () => {
+  it('maps Responses reasoning and logprobs without leaking Responses-only fields', () => {
     const result = convertResponsesBodyToOpenAiBody(
       {
         model: 'gpt-5',
@@ -1505,16 +1540,16 @@ describe('convertResponsesBodyToOpenAiBody', () => {
       model: 'gpt-5',
       stream: true,
       user: 'user-123',
-      include: ['reasoning.encrypted_content'],
-      previous_response_id: 'resp_prev',
-      truncation: 'auto',
       service_tier: 'priority',
+      logprobs: true,
       top_logprobs: 4,
-      reasoning: {
-        effort: 'high',
-        summary: 'auto',
-      },
+      reasoning_effort: 'high',
+      reasoning_summary: 'auto',
     });
+    expect(result.include).toBeUndefined();
+    expect(result.previous_response_id).toBeUndefined();
+    expect(result.truncation).toBeUndefined();
+    expect(result.reasoning).toBeUndefined();
   });
 
   it('does not inject default include for generic OpenAI-compatible fallback when reasoning options are present', () => {
@@ -1533,7 +1568,7 @@ describe('convertResponsesBodyToOpenAiBody', () => {
     expect(result.include).toBeUndefined();
   });
 
-  it('adds encrypted reasoning include for OpenAI-compatible fallback when the codex surface default is enabled', () => {
+  it('does not leak encrypted reasoning include into Chat fallback when the codex default is enabled', () => {
     const result = convertResponsesBodyToOpenAiBody(
       {
         model: 'gpt-5',
@@ -1547,12 +1582,9 @@ describe('convertResponsesBodyToOpenAiBody', () => {
       { defaultEncryptedReasoningInclude: true },
     );
 
-    expect(result).toMatchObject({
-      include: ['reasoning.encrypted_content'],
-      reasoning: {
-        effort: 'high',
-      },
-    });
+    expect(result.include).toBeUndefined();
+    expect(result.reasoning).toBeUndefined();
+    expect(result.reasoning_effort).toBe('high');
   });
 
   it('does not inject default include for generic OpenAI-compatible fallback when responses input omits include and reasoning', () => {
@@ -1568,7 +1600,7 @@ describe('convertResponsesBodyToOpenAiBody', () => {
     expect(result.include).toBeUndefined();
   });
 
-  it('adds encrypted reasoning include for OpenAI-compatible fallback when the codex surface default is enabled even without explicit reasoning config', () => {
+  it('does not inject encrypted reasoning include into Chat fallback without reasoning config', () => {
     const result = convertResponsesBodyToOpenAiBody(
       {
         model: 'gpt-5',
@@ -1579,12 +1611,10 @@ describe('convertResponsesBodyToOpenAiBody', () => {
       { defaultEncryptedReasoningInclude: true },
     );
 
-    expect(result).toMatchObject({
-      include: ['reasoning.encrypted_content'],
-    });
+    expect(result.include).toBeUndefined();
   });
 
-  it('respects an explicit empty include list for OpenAI-compatible fallback when the codex surface default is enabled', () => {
+  it('does not forward an explicit empty Responses include list to Chat fallback', () => {
     const result = convertResponsesBodyToOpenAiBody(
       {
         model: 'gpt-5',
@@ -1599,15 +1629,11 @@ describe('convertResponsesBodyToOpenAiBody', () => {
       { defaultEncryptedReasoningInclude: true },
     );
 
-    expect(result).toMatchObject({
-      include: [],
-      reasoning: {
-        effort: 'high',
-      },
-    });
+    expect(result.include).toBeUndefined();
+    expect(result.reasoning_effort).toBe('high');
   });
 
-  it('respects an explicit custom include list for OpenAI-compatible fallback when the codex surface default is enabled', () => {
+  it('does not forward an explicit custom Responses include list to Chat fallback', () => {
     const result = convertResponsesBodyToOpenAiBody(
       {
         model: 'gpt-5',
@@ -1622,12 +1648,8 @@ describe('convertResponsesBodyToOpenAiBody', () => {
       { defaultEncryptedReasoningInclude: true },
     );
 
-    expect(result).toMatchObject({
-      include: ['message.input_image.image_url'],
-      reasoning: {
-        effort: 'high',
-      },
-    });
+    expect(result.include).toBeUndefined();
+    expect(result.reasoning_effort).toBe('high');
   });
 
   it('keeps Responses input_file items when converting back to OpenAI-compatible bodies without conflicting file ids', () => {
@@ -1994,7 +2016,7 @@ describe('convertResponsesBodyToOpenAiBody', () => {
       false,
     );
 
-    expect(result.tools).toEqual([]);
+    expect(result.tools).toBeUndefined();
     expect(result.tool_choice).toBeUndefined();
   });
 
@@ -2123,13 +2145,11 @@ describe('convertResponsesBodyToOpenAiBody', () => {
         text: {
           format: {
             type: 'json_schema',
-            json_schema: {
-              name: 'payload',
-              schema: {
-                type: 'object',
-                properties: {
-                  value: { type: 'string' },
-                },
+            name: 'payload',
+            schema: {
+              type: 'object',
+              properties: {
+                value: { type: 'string' },
               },
             },
           },
@@ -2205,18 +2225,19 @@ describe('convertResponsesBodyToOpenAiBody', () => {
       model: 'gpt-5',
       stream: false,
       safety_identifier: 'safe-user-6',
-      max_tool_calls: 8,
       prompt_cache_key: 'cache-key-4',
-      prompt_cache_retention: '24h',
-      stream_options: { include_obfuscation: true },
-      background: false,
       verbosity: 'low',
-      truncation: 'auto',
-      previous_response_id: 'resp_prev_4',
-      include: ['reasoning.encrypted_content'],
+      logprobs: true,
       top_logprobs: 9,
       user: 'user-999',
       service_tier: 'default',
     });
+    expect(result.max_tool_calls).toBeUndefined();
+    expect(result.prompt_cache_retention).toBeUndefined();
+    expect(result.stream_options).toBeUndefined();
+    expect(result.background).toBeUndefined();
+    expect(result.truncation).toBeUndefined();
+    expect(result.previous_response_id).toBeUndefined();
+    expect(result.include).toBeUndefined();
   });
 });
