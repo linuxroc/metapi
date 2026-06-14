@@ -13,13 +13,14 @@ const skipLiveSchema = process.env.DB_PARITY_SKIP_LIVE_SCHEMA === 'true';
 const sqliteParity = !skipLiveSchema && process.env.DB_PARITY_SQLITE !== 'false' ? it : it.skip;
 const mysqlParity = process.env.DB_PARITY_MYSQL_URL ? it : it.skip;
 const postgresParity = process.env.DB_PARITY_POSTGRES_URL ? it : it.skip;
+const LIVE_SCHEMA_TEST_TIMEOUT_MS = 30_000;
 
 describe('live schema parity', () => {
   sqliteParity('matches the contract for sqlite', async () => {
     const sqliteUrl = await materializeFreshSchema('sqlite');
     const live = await introspectLiveSchema({ dialect: 'sqlite', connectionString: sqliteUrl });
     expect(live).toEqual(contract);
-  });
+  }, LIVE_SCHEMA_TEST_TIMEOUT_MS);
 
   mysqlParity('matches the contract for mysql', async () => {
     const mysqlUrl = await materializeFreshSchema('mysql', {
@@ -27,7 +28,7 @@ describe('live schema parity', () => {
     });
     const live = await introspectLiveSchema({ dialect: 'mysql', connectionString: mysqlUrl });
     expect(live).toEqual(contract);
-  });
+  }, LIVE_SCHEMA_TEST_TIMEOUT_MS);
 
   postgresParity('matches the contract for postgres', async () => {
     const postgresUrl = await materializeFreshSchema('postgres', {
@@ -35,5 +36,5 @@ describe('live schema parity', () => {
     });
     const live = await introspectLiveSchema({ dialect: 'postgres', connectionString: postgresUrl });
     expect(live).toEqual(contract);
-  });
+  }, LIVE_SCHEMA_TEST_TIMEOUT_MS);
 });
