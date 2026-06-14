@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { appendSessionTokenRebindHint, isCloudflareChallenge, isTokenExpiredError } from './alertRules.js';
+import {
+  appendSessionTokenRebindHint,
+  isCloudflareChallenge,
+  isExplicitTokenExpiredError,
+  isExplicitTokenExpirationResponse,
+  isTokenExpiredError,
+} from './alertRules.js';
 
 describe('alertRules', () => {
   it('detects cloudflare challenge messages', () => {
@@ -31,6 +37,41 @@ describe('alertRules', () => {
     })).toBe(false);
     expect(isTokenExpiredError({
       message: 'unauthorized',
+    })).toBe(false);
+  });
+
+  it('distinguishes explicit token failure messages from status-only auth failures', () => {
+    expect(isExplicitTokenExpiredError('expired token')).toBe(true);
+    expect(isExplicitTokenExpiredError('invalid access token')).toBe(true);
+    expect(isExplicitTokenExpiredError('Token 无效')).toBe(true);
+    expect(isExplicitTokenExpiredError('invalid_api_key')).toBe(true);
+    expect(isExplicitTokenExpiredError('Incorrect API key provided')).toBe(true);
+    expect(isExplicitTokenExpiredError('API Key 已被撤销')).toBe(true);
+    expect(isExplicitTokenExpiredError('Unauthorized')).toBe(false);
+    expect(isExplicitTokenExpiredError('HTTP 401')).toBe(false);
+    expect(isExplicitTokenExpiredError('未登录且未提供 access token')).toBe(false);
+  });
+
+  it('only treats explicit credential messages as immediate expiration on auth-related 4xx responses', () => {
+    expect(isExplicitTokenExpirationResponse({
+      status: 401,
+      message: 'expired token',
+    })).toBe(true);
+    expect(isExplicitTokenExpirationResponse({
+      status: 403,
+      message: 'invalid access token',
+    })).toBe(true);
+    expect(isExplicitTokenExpirationResponse({
+      status: 400,
+      message: 'invalid_api_key',
+    })).toBe(true);
+    expect(isExplicitTokenExpirationResponse({
+      status: 429,
+      message: 'token expired in upstream cache',
+    })).toBe(false);
+    expect(isExplicitTokenExpirationResponse({
+      status: 503,
+      message: 'token expired in upstream cache',
     })).toBe(false);
   });
 

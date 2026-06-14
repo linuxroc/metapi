@@ -76,6 +76,8 @@ vi.mock('../../services/downstreamApiKeyService.js', () => ({
 }));
 
 vi.mock('../../services/alertRules.js', () => ({
+  isExplicitTokenExpiredError: () => false,
+  isExplicitTokenExpirationResponse: () => false,
   isTokenExpiredError: () => false,
 }));
 

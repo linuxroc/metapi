@@ -175,32 +175,43 @@ export function TokensPanel({ embedded = false, onEmbeddedActionsChange }: Token
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [tokenRows, accountSnapshot] = await Promise.all([
+      const [tokensResult, accountsResult] = await Promise.allSettled([
         api.getAccountTokens(),
         api.getAccountsSnapshot(),
       ]);
-      const nextTokens = tokenRows || [];
-      setTokens(nextTokens);
-      setSelectedTokenIds((current) => current.filter((id) => nextTokens.some((token: any) => token.id === id)));
-      const latestAccounts: SyncableAccount[] = Array.isArray(accountSnapshot?.accounts)
-        ? accountSnapshot.accounts
+      const failures: string[] = [];
+      const nextTokens = tokensResult.status === 'fulfilled'
+        ? (tokensResult.value || [])
         : [];
-      setAccounts(latestAccounts);
+      const latestAccounts: SyncableAccount[] = accountsResult.status === 'fulfilled'
+        && Array.isArray(accountsResult.value?.accounts)
+        ? accountsResult.value.accounts
+        : [];
 
-      const syncableAccounts = latestAccounts.filter(isAccountSyncable);
-      const hasCurrentSelected = syncableAccounts.some((account: SyncableAccount) => account.id === syncingAccountId);
-      if (!hasCurrentSelected) {
-        setSyncingAccountId(syncableAccounts[0]?.id || 0);
+      if (tokensResult.status === 'fulfilled') {
+        setTokens(nextTokens);
+        setSelectedTokenIds((current) => current.filter((id) => nextTokens.some((token: any) => token.id === id)));
+      } else {
+        failures.push(tokensResult.reason?.message || '令牌列表加载失败');
+      }
+
+      if (accountsResult.status === 'fulfilled') {
+        setAccounts(latestAccounts);
+        const syncableAccounts = latestAccounts.filter(isAccountSyncable);
+        const hasCurrentSelected = syncableAccounts.some((account: SyncableAccount) => account.id === syncingAccountId);
+        if (!hasCurrentSelected) {
+          setSyncingAccountId(syncableAccounts[0]?.id || 0);
+        }
+      } else {
+        failures.push(accountsResult.reason?.message || '账号列表加载失败');
+      }
+
+      if (failures.length > 0) {
+        toast.error(`部分数据加载失败：${failures.join('；')}`);
       }
       return {
         tokens: nextTokens,
         accounts: latestAccounts,
-      };
-    } catch (e: any) {
-      toast.error(e.message || '加载令牌失败');
-      return {
-        tokens: [] as any[],
-        accounts: [] as any[],
       };
     } finally {
       setLoading(false);

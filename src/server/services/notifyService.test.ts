@@ -180,6 +180,32 @@ describe('notifyService', () => {
     const payload = sendMailMock.mock.calls[0]?.[0] as { text?: string };
     expect(payload?.text || '').toContain('Local Time:');
     expect(payload?.text || '').toContain('UTC Time:');
+    expect(createTransportMock).toHaveBeenCalledWith(expect.objectContaining({
+      connectionTimeout: 10_000,
+      greetingTimeout: 10_000,
+      socketTimeout: 15_000,
+    }));
+  });
+
+  it('adds a timeout signal to webhook delivery', async () => {
+    const { config } = await import('../config.js');
+    config.webhookEnabled = true;
+    config.webhookUrl = 'https://webhook.example.com/notify';
+    config.smtpEnabled = false;
+    fetchMock.mockResolvedValue({ ok: true, status: 200 });
+
+    const { sendNotification } = await import('./notifyService.js');
+    await sendNotification('测试通知', 'message', 'info', {
+      bypassThrottle: true,
+      throwOnFailure: true,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      config.webhookUrl,
+      expect.objectContaining({
+        signal: expect.any(AbortSignal),
+      }),
+    );
   });
 
   it('sends telegram message without topic when telegram thread id is empty', async () => {

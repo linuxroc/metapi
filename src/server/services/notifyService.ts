@@ -29,6 +29,12 @@ export type NotificationDispatchResult = {
 let cachedSmtpFingerprint = '';
 let cachedTransporter: Transporter | null = null;
 const notificationThrottleState = new Map<string, NotificationThrottleState>();
+const NOTIFICATION_REQUEST_TIMEOUT_MS = 10_000;
+const NOTIFICATION_SOCKET_TIMEOUT_MS = 15_000;
+
+function createNotificationTimeoutSignal(): AbortSignal {
+  return AbortSignal.timeout(NOTIFICATION_REQUEST_TIMEOUT_MS);
+}
 
 function getSmtpFingerprint() {
   return [
@@ -52,6 +58,9 @@ function getSmtpTransporter() {
     host: config.smtpHost,
     port: config.smtpPort,
     secure: config.smtpSecure,
+    connectionTimeout: NOTIFICATION_REQUEST_TIMEOUT_MS,
+    greetingTimeout: NOTIFICATION_REQUEST_TIMEOUT_MS,
+    socketTimeout: NOTIFICATION_SOCKET_TIMEOUT_MS,
     auth: config.smtpUser
       ? {
         user: config.smtpUser,
@@ -196,6 +205,7 @@ export async function sendNotification(
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body,
+            signal: createNotificationTimeoutSignal(),
           });
           if (!response.ok) {
             throw new Error(`Webhook 响应状态 ${response.status}`);
@@ -233,7 +243,10 @@ export async function sendNotification(
     tasks.push({
       channel: 'bark',
       run: async () => {
-        const response = await fetch(url, { method: 'GET' });
+        const response = await fetch(url, {
+          method: 'GET',
+          signal: createNotificationTimeoutSignal(),
+        });
         if (!response.ok) {
           throw new Error(`Bark 响应状态 ${response.status}`);
         }
@@ -254,6 +267,7 @@ export async function sendNotification(
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
             body: form.toString(),
+            signal: createNotificationTimeoutSignal(),
           });
           if (!response.ok) {
             throw new Error(`Server酱响应状态 ${response.status}`);
@@ -284,6 +298,7 @@ export async function sendNotification(
               text,
               disable_web_page_preview: true,
             }),
+            signal: createNotificationTimeoutSignal(),
           },
         );
         const response = await fetch(telegramApiUrl, telegramRequestInit);

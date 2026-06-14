@@ -5,6 +5,8 @@ import {
   hasOauthProvider,
   mergeAccountExtraConfig,
 } from './accountExtraConfig.js';
+import { deleteAdminSnapshot } from './adminSnapshotStore.js';
+import { clearSnapshotCache } from './snapshotCacheService.js';
 
 export type RuntimeHealthState = 'healthy' | 'unhealthy' | 'degraded' | 'unknown' | 'disabled';
 
@@ -212,6 +214,16 @@ export async function setAccountRuntimeHealth(
       })
       .where(eq(schema.accounts.id, accountId))
       .run();
+
+    clearSnapshotCache('accounts-snapshot');
+    try {
+      await deleteAdminSnapshot({
+        namespace: 'accounts-snapshot',
+        key: 'all',
+      });
+    } catch (error) {
+      console.warn('[accountHealth] failed to invalidate persisted account snapshot', error);
+    }
 
     return health;
   } catch {

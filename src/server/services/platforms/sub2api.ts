@@ -548,24 +548,27 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
 
     const base = normalizeBaseUrl(url);
     const { fetch } = await import('undici');
+    const probeTimeoutMs = 2_500;
     const probeEndpoint = async (path: string) => {
       try {
         return await fetch(`${base}${path}`, {
           method: 'GET',
-          signal: AbortSignal.timeout(5000),
+          signal: AbortSignal.timeout(probeTimeoutMs),
         });
       } catch {
         return null;
       }
     };
 
-    const matchSub2ApiErrorEnvelope = async (res: {
-      headers: { get(name: string): string | null };
-      json: () => Promise<unknown>;
-    } | null): Promise<boolean> => {
+    const matchSub2ApiErrorEnvelope = async (
+      res: Awaited<ReturnType<typeof probeEndpoint>>,
+    ): Promise<boolean> => {
       if (!res) return false;
       const contentType = res.headers.get('content-type') || '';
-      if (!contentType.toLowerCase().includes('application/json')) return false;
+      if (!contentType.toLowerCase().includes('application/json')) {
+        await res.body?.cancel().catch(() => {});
+        return false;
+      }
       const body = await res.json().catch(() => null) as Record<string, unknown> | null;
       if (!body || typeof body !== 'object') return false;
       const rawCode = body.code;
@@ -588,19 +591,27 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
       return false;
     };
 
-    const authProbe = await probeEndpoint('/api/v1/auth/me');
-    if (await matchSub2ApiErrorEnvelope(authProbe)) return true;
-
-    const modelsProbe = await probeEndpoint('/v1/models');
-    if (await matchSub2ApiErrorEnvelope(modelsProbe)) return true;
-
-    // Last fallback: many Sub2API UIs expose an identifying title on root.
-    const rootProbe = await probeEndpoint('/');
-    if (!rootProbe) return false;
-    const rootType = rootProbe.headers.get('content-type') || '';
-    if (!rootType.toLowerCase().includes('text/html')) return false;
-    const rootText = await rootProbe.text().catch(() => '');
-    return /<title>\s*sub2api\b/i.test(rootText);
+    const [authProbe, modelsProbe, rootProbe] = await Promise.all([
+      probeEndpoint('/api/v1/auth/me'),
+      probeEndpoint('/v1/models'),
+      probeEndpoint('/'),
+    ]);
+    const [authMatches, modelsMatch, rootMatches] = await Promise.all([
+      matchSub2ApiErrorEnvelope(authProbe),
+      matchSub2ApiErrorEnvelope(modelsProbe),
+      (async () => {
+        // Last fallback: many Sub2API UIs expose an identifying title on root.
+        if (!rootProbe) return false;
+        const rootType = rootProbe.headers.get('content-type') || '';
+        if (!rootType.toLowerCase().includes('text/html')) {
+          await rootProbe.body?.cancel().catch(() => {});
+          return false;
+        }
+        const rootText = await rootProbe.text().catch(() => '');
+        return /<title>\s*sub2api\b/i.test(rootText);
+      })(),
+    ]);
+    return authMatches || modelsMatch || rootMatches;
   }
 
   /**

@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { eq } from 'drizzle-orm';
 
 const refreshBalanceMock = vi.fn();
 
@@ -131,6 +132,88 @@ describe('accounts health refresh runtime state', () => {
     expect((response.json() as { message?: string }).message).toContain('账号 ID');
   });
 
+  it('retries one transient health refresh failure before persisting unhealthy state', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'Flaky Site',
+      url: 'https://flaky.example.com',
+      platform: 'done-hub',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'flaky-user',
+      accessToken: 'token',
+      status: 'active',
+    }).returning().get();
+
+    refreshBalanceMock
+      .mockRejectedValueOnce(new Error('HTTP 503: service unavailable'))
+      .mockResolvedValueOnce({ balance: 100, used: 0, quota: 100 });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/accounts/health/refresh',
+      payload: { accountId: account.id, wait: true },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: true,
+      summary: {
+        total: 1,
+        failed: 0,
+        success: 1,
+      },
+      results: [
+        {
+          accountId: account.id,
+          status: 'success',
+        },
+      ],
+    });
+    expect(refreshBalanceMock).toHaveBeenCalledTimes(2);
+
+    const stored = await db.select().from(schema.accounts)
+      .where(eq(schema.accounts.id, account.id))
+      .get();
+    expect(stored?.extraConfig || '').not.toContain('"state":"unhealthy"');
+  });
+
+  it('retries common fetch connection failures during health refresh', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'Network Flaky Site',
+      url: 'https://network-flaky.example.com',
+      platform: 'done-hub',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'network-flaky-user',
+      accessToken: 'token',
+      status: 'active',
+    }).returning().get();
+
+    refreshBalanceMock
+      .mockRejectedValueOnce(new TypeError('fetch failed'))
+      .mockResolvedValueOnce({ balance: 100, used: 0, quota: 100 });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/accounts/health/refresh',
+      payload: { accountId: account.id, wait: true },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: true,
+      summary: {
+        failed: 0,
+        success: 1,
+      },
+    });
+    expect(refreshBalanceMock).toHaveBeenCalledTimes(2);
+  });
+
   it('returns readable task messages when starting a background refresh for all accounts', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'Wind Hub',
@@ -224,6 +307,19 @@ describe('accounts health refresh runtime state', () => {
         state: 'unhealthy',
         message: '站点健康检查超时（10s）',
       });
+      const refreshOptions = refreshBalanceMock.mock.calls[0]?.[1] as {
+        signal?: AbortSignal;
+      } | undefined;
+      expect(refreshOptions?.signal?.aborted).toBe(true);
+
+      const latestAccount = await db
+        .select()
+        .from(schema.accounts)
+        .where(eq(schema.accounts.id, account.id))
+        .get();
+      expect(latestAccount?.status).toBe('active');
+      expect(latestAccount?.extraConfig || '').toContain('"state":"unhealthy"');
+      expect(latestAccount?.extraConfig || '').toContain('站点健康检查超时（10s）');
     } finally {
       vi.useRealTimers();
     }

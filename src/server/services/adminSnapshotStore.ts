@@ -5,7 +5,7 @@ import type {
   SnapshotPersistenceAdapter,
 } from "./snapshotCacheService.js";
 
-type AdminSnapshotIdentity = {
+export type AdminSnapshotIdentity = {
   namespace: string;
   key: string;
 };
@@ -16,10 +16,15 @@ function serializeSnapshotKey(key: string) {
   return JSON.stringify(key);
 }
 
-function buildSnapshotWhere(identity: AdminSnapshotIdentity) {
-  return and(
+function buildSnapshotWhere(identity: AdminSnapshotIdentity, generatedAt?: string) {
+  const identityWhere = and(
     eq(schema.adminSnapshots.namespace, identity.namespace),
     eq(schema.adminSnapshots.snapshotKey, serializeSnapshotKey(identity.key)),
+  );
+  if (!generatedAt) return identityWhere;
+  return and(
+    identityWhere,
+    eq(schema.adminSnapshots.generatedAt, generatedAt),
   );
 }
 
@@ -100,6 +105,16 @@ export async function writeAdminSnapshot<T>(
     .run();
 }
 
+export async function deleteAdminSnapshot(
+  identity: AdminSnapshotIdentity,
+  generatedAt?: string,
+): Promise<void> {
+  await db
+    .delete(schema.adminSnapshots)
+    .where(buildSnapshotWhere(identity, generatedAt))
+    .run();
+}
+
 export async function deleteExpiredAdminSnapshots(beforeIso?: string) {
   const cutoffIso = beforeIso || new Date().toISOString();
   await db
@@ -114,5 +129,6 @@ export function createAdminSnapshotPersistence<T>(
   return {
     read: () => readAdminSnapshot<T>(identity),
     write: (record) => writeAdminSnapshot(identity, record),
+    delete: (record) => deleteAdminSnapshot(identity, record.generatedAt),
   };
 }

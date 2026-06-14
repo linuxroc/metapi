@@ -64,6 +64,7 @@ let siteProxyCache: {
 const dispatcherCache = new Map<string, Dispatcher>();
 
 const accountProxyOverride = new AsyncLocalStorage<string | null>();
+const siteRequestAbortSignal = new AsyncLocalStorage<AbortSignal>();
 
 export function withAccountProxyOverride<T>(
   proxyUrl: string | null | undefined,
@@ -72,6 +73,14 @@ export function withAccountProxyOverride<T>(
   const normalized = normalizeSiteProxyUrl(proxyUrl);
   if (!normalized) return fn();
   return accountProxyOverride.run(normalized, fn);
+}
+
+export function withSiteRequestAbortSignal<T>(
+  signal: AbortSignal | null | undefined,
+  fn: () => Promise<T>,
+): Promise<T> {
+  if (!signal) return fn();
+  return siteRequestAbortSignal.run(signal, fn);
 }
 
 type ParsedSocksProxyConfig = {
@@ -410,6 +419,10 @@ export async function withSiteProxyRequestInit(
   const nextOptions: UndiciRequestInit = {
     ...(options || {}),
   };
+  const ambientSignal = siteRequestAbortSignal.getStore();
+  if (!nextOptions.signal && ambientSignal) {
+    nextOptions.signal = ambientSignal;
+  }
   const mergedHeaders = mergeHeadersWithSiteCustomHeaders(resolved.customHeaders, options?.headers);
   if (mergedHeaders) {
     nextOptions.headers = mergedHeaders;
@@ -465,6 +478,10 @@ export function withSiteRecordProxyRequestInit(
   const nextOptions: UndiciRequestInit = {
     ...(options || {}),
   };
+  const ambientSignal = siteRequestAbortSignal.getStore();
+  if (!nextOptions.signal && ambientSignal) {
+    nextOptions.signal = ambientSignal;
+  }
   const mergedHeaders = mergeHeadersWithSiteCustomHeaders(site?.customHeaders, options?.headers);
   if (mergedHeaders) {
     nextOptions.headers = mergedHeaders;

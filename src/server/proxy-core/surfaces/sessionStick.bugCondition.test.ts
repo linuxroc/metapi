@@ -82,6 +82,8 @@ vi.mock('../../services/alertService.js', () => ({
   reportTokenExpired: vi.fn(),
 }));
 vi.mock('../../services/alertRules.js', () => ({
+  isExplicitTokenExpiredError: vi.fn(() => false),
+  isExplicitTokenExpirationResponse: vi.fn(() => false),
   isTokenExpiredError: vi.fn(() => false),
 }));
 vi.mock('../../services/proxyRetryPolicy.js', () => ({

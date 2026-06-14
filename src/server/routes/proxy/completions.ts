@@ -4,6 +4,7 @@ import { config } from '../../config.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
 import { reportProxyAllFailed, reportTokenExpired } from '../../services/alertService.js';
 import { isTokenExpiredError } from '../../services/alertRules.js';
+import { reportExplicitProxyTokenExpiration } from '../../services/proxyTokenExpirationService.js';
 import { shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { resolveProxyUsageWithSelfLogFallback } from '../../services/proxyUsageFallbackService.js';
 import { mergeProxyUsage, parseProxyUsage, pullSseDataEvents } from '../../services/proxyUsageParser.js';
@@ -345,17 +346,29 @@ export async function completionsProxyRoute(app: FastifyInstance) {
           isStream,
           firstByteLatencyMs,
         );
-        if (status > 0 && isTokenExpiredError({ status, message: errorText })) {
+        const explicitTokenExpiration = await reportExplicitProxyTokenExpiration({
+          status,
+          errorText,
+          accountId: selected.account.id,
+          username: selected.account.username,
+          siteName: selected.site.name,
+          warningScope: 'completions',
+        });
+        if ((status > 0 ? shouldRetryProxyRequest(status, errorText) : true) && canRetryChannelSelection(retryCount, forcedChannelId)) {
+          retryCount++;
+          continue;
+        }
+        if (
+          !explicitTokenExpiration
+          && status > 0
+          && isTokenExpiredError({ status, message: errorText })
+        ) {
           await reportTokenExpired({
             accountId: selected.account.id,
             username: selected.account.username,
             siteName: selected.site.name,
             detail: `HTTP ${status}`,
-          });
-        }
-        if ((status > 0 ? shouldRetryProxyRequest(status, errorText) : true) && canRetryChannelSelection(retryCount, forcedChannelId)) {
-          retryCount++;
-          continue;
+          }, { waitForAlert: false });
         }
         await reportProxyAllFailed({
           model: requestedModel,

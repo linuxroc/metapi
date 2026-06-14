@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api, type ProxyTestRequestEnvelope } from './api.js';
-import { persistAuthSession } from './authSession.js';
+import { getAuthToken, persistAuthSession } from './authSession.js';
 
 function createMemoryStorage() {
   const store = new Map<string, string>();
@@ -177,5 +177,75 @@ describe('api proxy test timeout handling', () => {
   it('reuses the same proxy test implementations for legacy aliases', () => {
     expect(api.proxyTest).toBe(api.testProxy);
     expect(api.proxyTestStream).toBe(api.testProxyStream);
+  });
+
+  it('retries transient admin GET failures once', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(
+        JSON.stringify({ message: 'temporarily unavailable' }),
+        { status: 503, headers: { 'content-type': 'application/json' } },
+      ))
+      .mockResolvedValueOnce(new Response(
+        JSON.stringify([{ id: 1, name: 'site-a' }]),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const resultPromise = api.getSites();
+    await vi.advanceTimersByTimeAsync(200);
+
+    await expect(resultPromise).resolves.toEqual([{ id: 1, name: 'site-a' }]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps retries inside the original admin GET timeout budget', async () => {
+    const fetchMock = installPendingFetch();
+
+    const promise = api.getSites().catch((error: Error) => error);
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    await expect(promise).resolves.toMatchObject({ message: '请求超时（30s）' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry admin write requests', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ message: 'temporarily unavailable' }),
+      { status: 503, headers: { 'content-type': 'application/json' } },
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(api.addSite({ name: 'site-a' })).rejects.toThrow('temporarily unavailable');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the admin session for business-level 403 responses', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ message: '旧 Token 验证失败' }),
+      { status: 403, headers: { 'content-type': 'application/json' } },
+    )));
+
+    await expect(api.getSites()).rejects.toThrow('旧 Token 验证失败');
+    expect(getAuthToken(globalThis.localStorage as Storage)).toBe('token-1');
+  });
+
+  it('keeps the admin session for business-level 401 responses', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ error: 'upstream_unauthorized' }),
+      { status: 401, headers: { 'content-type': 'application/json' } },
+    )));
+
+    await expect(api.getSites()).rejects.toThrow('upstream_unauthorized');
+    expect(getAuthToken(globalThis.localStorage as Storage)).toBe('token-1');
+  });
+
+  it('clears the admin session for middleware invalid-token responses', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ error: 'Invalid token' }),
+      { status: 403, headers: { 'content-type': 'application/json' } },
+    )));
+
+    await expect(api.getSites()).rejects.toThrow('Session expired');
+    expect(getAuthToken(globalThis.localStorage as Storage)).toBeNull();
   });
 });

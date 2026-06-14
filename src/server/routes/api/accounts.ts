@@ -58,6 +58,9 @@ import {
   parseBatchApiKeys,
 } from "../../services/apiKeyBatch.js";
 import { createManualAccount } from "../../services/manualAccountCreationService.js";
+import {
+  runAccountHealthRefreshWithRetry,
+} from "../../services/accountHealthRefreshRetry.js";
 
 type AccountWithSiteRow = {
   accounts: typeof schema.accounts.$inferSelect;
@@ -234,7 +237,6 @@ type LoginFailureInfo = {
   shieldBlocked: boolean;
 };
 
-const ACCOUNT_HEALTH_REFRESH_TIMEOUT_MS = 10_000;
 const ACCOUNT_VERIFY_TIMEOUT_MS = 10_000;
 const ACCOUNT_VERIFY_DIAG_TIMEOUT_MS = 2_500;
 
@@ -388,7 +390,7 @@ async function refreshRuntimeHealthForRow(
     (row.accounts.status || "active") === "disabled" ||
     (row.sites.status || "active") === "disabled"
   ) {
-    setAccountRuntimeHealth(accountId, {
+    await setAccountRuntimeHealth(accountId, {
       state: "disabled",
       reason: "账号或站点已禁用",
       source: "health-refresh",
@@ -415,10 +417,8 @@ async function refreshRuntimeHealthForRow(
   }
 
   try {
-    await withTimeout(
-      () => refreshBalance(accountId),
-      ACCOUNT_HEALTH_REFRESH_TIMEOUT_MS,
-      `站点健康检查超时（${Math.max(1, Math.round(ACCOUNT_HEALTH_REFRESH_TIMEOUT_MS / 1000))}s）`,
+    await runAccountHealthRefreshWithRetry(
+      (signal) => refreshBalance(accountId, { signal }),
     );
     const refreshedAccount = await db
       .select()
@@ -442,7 +442,7 @@ async function refreshRuntimeHealthForRow(
     };
   } catch (error: any) {
     const message = String(error?.message || "健康检查失败");
-    setAccountRuntimeHealth(accountId, {
+    await setAccountRuntimeHealth(accountId, {
       state: "unhealthy",
       reason: message,
       source: "health-refresh",

@@ -119,6 +119,29 @@ describe('Tokens batch actions', () => {
     }
   });
 
+  it('keeps token rows available when the account snapshot request fails', async () => {
+    apiMock.getAccounts.mockRejectedValueOnce(new Error('account snapshot unavailable'));
+
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <ToastProvider>
+            <MemoryRouter initialEntries={['/accounts?segment=tokens']}>
+              <TokensPanel />
+            </MemoryRouter>
+          </ToastProvider>,
+        );
+      });
+      await flushMicrotasks();
+
+      expect(root.root.find((node) => node.props['data-testid'] === 'token-row-1')).toBeTruthy();
+      expect(root.root.find((node) => node.props['data-testid'] === 'token-row-2')).toBeTruthy();
+    } finally {
+      root?.unmount();
+    }
+  });
+
   it('selects a token when clicking the row instead of only the checkbox', async () => {
     let root!: WebTestRenderer;
     try {

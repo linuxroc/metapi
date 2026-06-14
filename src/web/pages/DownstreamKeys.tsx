@@ -494,21 +494,37 @@ export default function DownstreamKeys() {
   const load = async () => {
     setLoading(true);
     try {
-      const [summaryRes, rawRes, routesRes] = await Promise.all([
+      const [summaryResult, rawResult, routesResult] = await Promise.allSettled([
         api.getDownstreamApiKeysSummary({ range }),
         api.getDownstreamApiKeys(),
         api.getRoutesLite(),
       ]);
-      setSummaryItems(Array.isArray(summaryRes?.items) ? summaryRes.items : []);
-      setRawItems(Array.isArray(rawRes?.items) ? rawRes.items : []);
-      setRouteOptions((Array.isArray(routesRes) ? routesRes : []).map((row: any) => ({
-        id: Number(row.id),
-        modelPattern: String(row.modelPattern || ''),
-        displayName: row.displayName,
-        enabled: !!row.enabled,
-      })));
-    } catch (err: any) {
-      toast.error(err?.message || '加载下游密钥列表失败');
+      const failures: string[] = [];
+
+      if (summaryResult.status === 'fulfilled') {
+        setSummaryItems(Array.isArray(summaryResult.value?.items) ? summaryResult.value.items : []);
+      } else {
+        failures.push(summaryResult.reason?.message || '统计信息加载失败');
+      }
+      if (rawResult.status === 'fulfilled') {
+        setRawItems(Array.isArray(rawResult.value?.items) ? rawResult.value.items : []);
+      } else {
+        failures.push(rawResult.reason?.message || '密钥列表加载失败');
+      }
+      if (routesResult.status === 'fulfilled') {
+        setRouteOptions((Array.isArray(routesResult.value) ? routesResult.value : []).map((row: any) => ({
+          id: Number(row.id),
+          modelPattern: String(row.modelPattern || ''),
+          displayName: row.displayName,
+          enabled: !!row.enabled,
+        })));
+      } else {
+        failures.push(routesResult.reason?.message || '路由列表加载失败');
+      }
+
+      if (failures.length > 0) {
+        toast.error(`部分数据加载失败：${failures.join('；')}`);
+      }
     } finally {
       setLoading(false);
     }
@@ -518,10 +534,23 @@ export default function DownstreamKeys() {
     if (exclusionSourceLoading || exclusionSourceLoaded) return;
     setExclusionSourceLoading(true);
     try {
-      const [accountsSnapshotRes, tokensRes] = await Promise.all([
+      const [accountsResult, tokensResult] = await Promise.allSettled([
         api.getAccountsSnapshot(),
         api.getAccountTokens(),
       ]);
+      const failures: string[] = [];
+      const accountsSnapshotRes = accountsResult.status === 'fulfilled'
+        ? accountsResult.value
+        : null;
+      const tokensRes = tokensResult.status === 'fulfilled'
+        ? tokensResult.value
+        : [];
+      if (accountsResult.status === 'rejected') {
+        failures.push(accountsResult.reason?.message || '账号列表加载失败');
+      }
+      if (tokensResult.status === 'rejected') {
+        failures.push(tokensResult.reason?.message || '令牌列表加载失败');
+      }
 
       const accountRows = Array.isArray(accountsSnapshotRes?.accounts)
         ? accountsSnapshotRes.accounts
@@ -587,7 +616,10 @@ export default function DownstreamKeys() {
           )
         )),
       );
-      setExclusionSourceLoaded(true);
+      setExclusionSourceLoaded(failures.length === 0);
+      if (failures.length > 0) {
+        toast.error(`部分排除项加载失败：${failures.join('；')}`);
+      }
     } catch (err: any) {
       toast.error(err?.message || '加载可排除站点与令牌失败');
     } finally {

@@ -16,12 +16,18 @@ import { decryptAccountPassword } from './accountCredentialService.js';
 import { extractRuntimeHealth, setAccountRuntimeHealth } from './accountHealthService.js';
 import { updateTodayIncomeSnapshot } from './todayIncomeRewardService.js';
 import type { BalanceInfo } from './platforms/base.js';
-import { withAccountProxyOverride, withSiteProxyRequestInit, withSiteRecordProxyRequestInit } from './siteProxy.js';
+import {
+  withAccountProxyOverride,
+  withSiteProxyRequestInit,
+  withSiteRecordProxyRequestInit,
+  withSiteRequestAbortSignal,
+} from './siteProxy.js';
 import {
   isManagedSub2ApiTokenDue,
   isSub2ApiPlatform,
 } from './sub2apiManagedAuth.js';
 import { refreshSub2ApiManagedSessionSingleflight } from './sub2apiRefreshSingleflight.js';
+import { invalidateTokenRouterCache } from './tokenRouter.js';
 
 function isSiteDisabled(status?: string | null): boolean {
   return (status || 'active') === 'disabled';
@@ -31,6 +37,18 @@ function isApiKeyConnection(account: typeof schema.accounts.$inferSelect): boole
   const explicit = getCredentialModeFromExtraConfig(account.extraConfig);
   if (explicit && explicit !== 'auto') return explicit === 'apikey';
   return !(account.accessToken || '').trim();
+}
+
+type RefreshBalanceOptions = {
+  signal?: AbortSignal | null;
+};
+
+function throwIfBalanceRefreshAborted(signal?: AbortSignal | null): void {
+  if (!signal?.aborted) return;
+  if (signal.reason instanceof Error) throw signal.reason;
+  const error = new Error('balance refresh aborted');
+  error.name = 'AbortError';
+  throw error;
 }
 
 function shouldAttemptAutoRelogin(message?: string | null): boolean {
@@ -208,7 +226,12 @@ async function fetchTodayIncomeFromLogs(params: {
   return Math.round(totalIncome * 1_000_000) / 1_000_000;
 }
 
-async function tryAutoRelogin(account: any, site: any): Promise<string | null> {
+async function tryAutoRelogin(
+  account: any,
+  site: any,
+  signal?: AbortSignal | null,
+): Promise<string | null> {
+  throwIfBalanceRefreshAborted(signal);
   const adapter = getAdapter(site.platform);
   if (!adapter) return null;
 
@@ -222,8 +245,10 @@ async function tryAutoRelogin(account: any, site: any): Promise<string | null> {
     resolveProxyUrlFromExtraConfig(account.extraConfig),
     () => adapter.login(site.url, relogin.username, password),
   );
+  throwIfBalanceRefreshAborted(signal);
   if (!loginResult.success || !loginResult.accessToken) return null;
 
+  throwIfBalanceRefreshAborted(signal);
   await db.update(schema.accounts)
     .set({
       accessToken: loginResult.accessToken,
@@ -236,13 +261,34 @@ async function tryAutoRelogin(account: any, site: any): Promise<string | null> {
   return loginResult.accessToken;
 }
 
-export async function refreshBalance(accountId: number) {
+export async function refreshBalance(
+  accountId: number,
+  options: RefreshBalanceOptions = {},
+): Promise<BalanceInfo | null | {
+  balance: number;
+  used: number;
+  quota: number;
+  skipped: true;
+  reason: string;
+}> {
+  return withSiteRequestAbortSignal(
+    options.signal,
+    () => refreshBalanceWithinRequestContext(accountId, options.signal),
+  );
+}
+
+async function refreshBalanceWithinRequestContext(
+  accountId: number,
+  signal?: AbortSignal | null,
+) {
+  throwIfBalanceRefreshAborted(signal);
   const rows = await db
     .select()
     .from(schema.accounts)
     .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
     .where(eq(schema.accounts.id, accountId))
     .all();
+  throwIfBalanceRefreshAborted(signal);
 
   if (rows.length === 0) return null;
 
@@ -250,7 +296,8 @@ export async function refreshBalance(accountId: number) {
   const site = rows[0].sites;
 
   if (isSiteDisabled(site.status)) {
-    setAccountRuntimeHealth(account.id, {
+    throwIfBalanceRefreshAborted(signal);
+    await setAccountRuntimeHealth(account.id, {
       state: 'disabled',
       reason: '站点已禁用',
       source: 'balance',
@@ -296,14 +343,25 @@ export async function refreshBalance(accountId: number) {
         });
         activeAccessToken = refreshed.accessToken;
         activeExtraConfig = refreshed.extraConfig;
-      } catch {}
+        throwIfBalanceRefreshAborted(signal);
+      } catch {
+        throwIfBalanceRefreshAborted(signal);
+      }
     }
   }
-  const readBalance = async (token: string) => withAccountProxyOverride(accountProxyUrl,
-    () => adapter.getBalance(site.url, token, platformUserId));
+  const readBalance = async (token: string) => {
+    throwIfBalanceRefreshAborted(signal);
+    const result = await withAccountProxyOverride(
+      accountProxyUrl,
+      () => adapter.getBalance(site.url, token, platformUserId),
+    );
+    throwIfBalanceRefreshAborted(signal);
+    return result;
+  };
   const handleBalanceError = async (err: any) => {
+    throwIfBalanceRefreshAborted(signal);
     const message = appendSessionTokenRebindHint(err?.message || 'unknown error');
-    setAccountRuntimeHealth(account.id, {
+    await setAccountRuntimeHealth(account.id, {
       state: 'unhealthy',
       reason: message,
       source: 'balance',
@@ -322,6 +380,7 @@ export async function refreshBalance(accountId: number) {
   try {
     balanceInfo = await readBalance(activeAccessToken);
   } catch (err: any) {
+    throwIfBalanceRefreshAborted(signal);
     const message = err?.message || 'unknown error';
     const canTryManagedSub2ApiRefresh =
       isSub2ApiPlatform(site.platform)
@@ -338,17 +397,20 @@ export async function refreshBalance(accountId: number) {
         });
         activeAccessToken = refreshed.accessToken;
         activeExtraConfig = refreshed.extraConfig;
+        throwIfBalanceRefreshAborted(signal);
         balanceInfo = await readBalance(activeAccessToken);
       } catch (retryErr: any) {
+        throwIfBalanceRefreshAborted(signal);
         await handleBalanceError(retryErr);
       }
     } else if (shouldAttemptAutoRelogin(message)) {
-      const refreshedAccessToken = await tryAutoRelogin(account, site);
+      const refreshedAccessToken = await tryAutoRelogin(account, site, signal);
       if (refreshedAccessToken) {
         activeAccessToken = refreshedAccessToken;
         try {
           balanceInfo = await readBalance(activeAccessToken);
         } catch (retryErr: any) {
+          throwIfBalanceRefreshAborted(signal);
           await handleBalanceError(retryErr);
         }
       } else {
@@ -362,6 +424,7 @@ export async function refreshBalance(accountId: number) {
   if (!balanceInfo) {
     throw new Error('failed to fetch balance');
   }
+  throwIfBalanceRefreshAborted(signal);
 
   if (
     !(typeof balanceInfo.todayIncome === 'number' && Number.isFinite(balanceInfo.todayIncome)) &&
@@ -378,6 +441,7 @@ export async function refreshBalance(accountId: number) {
         balanceInfo.todayIncome = fallbackIncome;
       }
     } catch {}
+    throwIfBalanceRefreshAborted(signal);
   }
 
   let nextExtraConfig = activeExtraConfig;
@@ -405,12 +469,17 @@ export async function refreshBalance(accountId: number) {
     updates.extraConfig = nextExtraConfig;
   }
 
+  throwIfBalanceRefreshAborted(signal);
   await db.update(schema.accounts)
     .set(updates)
     .where(eq(schema.accounts.id, accountId))
     .run();
+  if (account.status === 'expired') {
+    invalidateTokenRouterCache();
+  }
 
-  setAccountRuntimeHealth(account.id, {
+  throwIfBalanceRefreshAborted(signal);
+  await setAccountRuntimeHealth(account.id, {
     state: keepUnsupportedCheckinDegraded ? 'degraded' : 'healthy',
     reason: keepUnsupportedCheckinDegraded
       ? (existingRuntimeHealth?.reason || '\u7ad9\u70b9\u4e0d\u652f\u6301\u7b7e\u5230\u63a5\u53e3')

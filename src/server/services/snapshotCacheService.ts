@@ -21,6 +21,7 @@ export type PersistedSnapshotRecord<T> = {
 export type SnapshotPersistenceAdapter<T> = {
   read: () => Promise<PersistedSnapshotRecord<T> | null>;
   write: (record: PersistedSnapshotRecord<T>) => Promise<void>;
+  delete?: (record: PersistedSnapshotRecord<T>) => Promise<void>;
 };
 
 type SnapshotCacheEntry<T> = {
@@ -43,6 +44,22 @@ type ReadSnapshotOptions<T> = {
 
 const SNAPSHOT_CACHE_MAX_ENTRIES = 64;
 const snapshotCache = new Map<string, SnapshotCacheEntry<unknown>>();
+const snapshotNamespaceGenerations = new Map<string, number>();
+
+function getSnapshotGeneration(namespace: string): number {
+  const generation = snapshotNamespaceGenerations.get(namespace) ?? 0;
+  if (!snapshotNamespaceGenerations.has(namespace)) {
+    snapshotNamespaceGenerations.set(namespace, generation);
+  }
+  return generation;
+}
+
+function advanceSnapshotGeneration(namespace: string): void {
+  snapshotNamespaceGenerations.set(
+    namespace,
+    getSnapshotGeneration(namespace) + 1,
+  );
+}
 
 function getSnapshotCacheEntry<T>(cacheKey: string) {
   const cached = snapshotCache.get(cacheKey) as SnapshotCacheEntry<T> | undefined;
@@ -75,10 +92,12 @@ function buildCacheKey(namespace: string, key: string) {
 }
 
 async function loadAndStoreSnapshot<T>(
+  namespace: string,
   cacheKey: string,
   loader: () => Promise<T>,
   ttlMs: number,
   staleMs: number,
+  generation: number,
   persistence?: SnapshotPersistenceAdapter<T>,
 ) {
   const payload = await loader();
@@ -96,6 +115,8 @@ async function loadAndStoreSnapshot<T>(
     generatedAt: persistedRecord.generatedAt,
     cacheStatus: "miss",
   };
+  if (getSnapshotGeneration(namespace) !== generation) return envelope;
+
   setSnapshotCacheEntry(cacheKey, {
     payload,
     generatedAtMs: nowMs,
@@ -105,6 +126,9 @@ async function loadAndStoreSnapshot<T>(
   if (persistence) {
     try {
       await persistence.write(persistedRecord);
+      if (getSnapshotGeneration(namespace) !== generation && persistence.delete) {
+        await persistence.delete(persistedRecord);
+      }
     } catch (error) {
       console.warn(
         `[snapshotCache] persistence write failed for ${cacheKey}:`,
@@ -149,12 +173,16 @@ export async function readSnapshotCache<T>(
   let cached = getSnapshotCacheEntry<T>(cacheKey);
 
   if (!cached && !options.forceRefresh && options.persistence) {
+    const persistenceReadGeneration = getSnapshotGeneration(options.namespace);
     try {
       const persisted = await options.persistence.read();
       const shared = getSnapshotCacheEntry<T>(cacheKey);
       if (shared) {
         cached = shared;
-      } else if (persisted) {
+      } else if (
+        persisted
+        && getSnapshotGeneration(options.namespace) === persistenceReadGeneration
+      ) {
         cached = buildCacheEntryFromPersistedSnapshot(persisted);
         setSnapshotCacheEntry(cacheKey, cached);
       }
@@ -186,16 +214,20 @@ export async function readSnapshotCache<T>(
     cached.staleUntilMs > nowMs
   ) {
     if (!cached.inFlight) {
-      cached.inFlight = loadAndStoreSnapshot(
+      let refreshPromise: Promise<SnapshotEnvelope<T>>;
+      refreshPromise = loadAndStoreSnapshot(
+        options.namespace,
         cacheKey,
         options.loader,
         options.ttlMs,
         staleMs,
+        getSnapshotGeneration(options.namespace),
         options.persistence,
       ).finally(() => {
-          const next = snapshotCache.get(cacheKey) as SnapshotCacheEntry<T> | undefined;
-          if (next) delete next.inFlight;
-        });
+        const next = snapshotCache.get(cacheKey) as SnapshotCacheEntry<T> | undefined;
+        if (next?.inFlight === refreshPromise) delete next.inFlight;
+      });
+      cached.inFlight = refreshPromise;
       void cached.inFlight.catch((error) => {
         console.error(
           `[snapshotCache] background refresh failed for ${cacheKey}:`,
@@ -235,17 +267,20 @@ export async function readSnapshotCache<T>(
     };
   }
 
-  const inFlight = loadAndStoreSnapshot(
+  let inFlight: Promise<SnapshotEnvelope<T>>;
+  inFlight = loadAndStoreSnapshot(
+    options.namespace,
     cacheKey,
     options.loader,
     options.ttlMs,
     staleMs,
+    getSnapshotGeneration(options.namespace),
     options.persistence,
   ).finally(() => {
     const next = snapshotCache.get(cacheKey) as
       | SnapshotCacheEntry<T>
       | undefined;
-    if (next) delete next.inFlight;
+    if (next?.inFlight === inFlight) delete next.inFlight;
   });
 
   setSnapshotCacheEntry(cacheKey, {
@@ -269,9 +304,13 @@ export async function readSnapshotCache<T>(
 
 export function clearSnapshotCache(namespace?: string) {
   if (!namespace) {
+    for (const knownNamespace of snapshotNamespaceGenerations.keys()) {
+      advanceSnapshotGeneration(knownNamespace);
+    }
     snapshotCache.clear();
     return;
   }
+  advanceSnapshotGeneration(namespace);
   for (const key of snapshotCache.keys()) {
     if (key.startsWith(`${namespace}:`)) snapshotCache.delete(key);
   }

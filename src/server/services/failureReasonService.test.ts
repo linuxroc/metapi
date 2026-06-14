@@ -58,4 +58,17 @@ describe('failureReasonService', () => {
     expect(result.code).toBe('checkin_not_supported');
     expect(result.category).toBe('site');
   });
+
+  it.each([
+    'fetch failed',
+    'socket hang up',
+    'read ECONNRESET',
+    'connect ECONNREFUSED 127.0.0.1:443',
+    'getaddrinfo ENOTFOUND upstream.example.com',
+    'getaddrinfo EAI_AGAIN upstream.example.com',
+  ])('classifies transient connection failure: %s', (message) => {
+    const result = classifyFailureReason({ message, status: 'failed' });
+    expect(result.code).toBe('network_connection_error');
+    expect(result.category).toBe('network');
+  });
 });

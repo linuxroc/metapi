@@ -17,6 +17,7 @@ type FailureReasonCode =
   | 'token_expired'
   | 'already_checked_in'
   | 'network_timeout'
+  | 'network_connection_error'
   | 'upstream_error'
   | 'unknown_error';
 
@@ -125,6 +126,29 @@ export function classifyFailureReason(
       title: '请求超时',
       actionHint: '稍后重试并检查网络',
       detailHint: '请求在超时时间内未完成，可能是网络波动或站点响应慢。',
+    };
+  }
+
+  if (includesAny(text, [
+    'fetch failed',
+    'network error',
+    'network failure',
+    'socket hang up',
+    'connection reset',
+    'connection refused',
+    'econnreset',
+    'econnrefused',
+    'enotfound',
+    'eai_again',
+    'getaddrinfo',
+    'dns lookup',
+  ])) {
+    return {
+      code: 'network_connection_error',
+      category: 'network',
+      title: '网络连接失败',
+      actionHint: '稍后重试并检查网络',
+      detailHint: '请求未能连接到上游站点，可能是临时网络、DNS 或连接中断问题。',
     };
   }
 

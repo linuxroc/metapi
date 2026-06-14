@@ -14,6 +14,7 @@ const decryptPasswordMock = vi.fn();
 const setAccountRuntimeHealthMock = vi.fn();
 const extractRuntimeHealthMock = vi.fn();
 const undiciFetchMock = vi.fn();
+const invalidateTokenRouterCacheMock = vi.fn();
 
 vi.mock('../db/index.js', () => {
   const selectChain = {
@@ -79,6 +80,10 @@ vi.mock('./accountHealthService.js', () => ({
   extractRuntimeHealth: (...args: unknown[]) => extractRuntimeHealthMock(...args),
 }));
 
+vi.mock('./tokenRouter.js', () => ({
+  invalidateTokenRouterCache: (...args: unknown[]) => invalidateTokenRouterCacheMock(...args),
+}));
+
 vi.mock('undici', () => ({
   fetch: (...args: unknown[]) => undiciFetchMock(...args),
 }));
@@ -96,12 +101,55 @@ describe('balanceService auto relogin', () => {
     setAccountRuntimeHealthMock.mockReset();
     extractRuntimeHealthMock.mockReset();
     undiciFetchMock.mockReset();
+    invalidateTokenRouterCacheMock.mockReset();
 
     extractRuntimeHealthMock.mockReturnValue(null);
     undiciFetchMock.mockResolvedValue({
       ok: false,
       json: async () => ({}),
     });
+  });
+
+  it('does not write account state after an aborted balance request resolves late', async () => {
+    selectAllMock.mockReturnValue([
+      {
+        accounts: {
+          id: 20,
+          username: 'slow-user',
+          accessToken: 'token',
+          status: 'active',
+          extraConfig: null,
+        },
+        sites: {
+          id: 3,
+          name: 'slow-site',
+          url: 'https://slow.example.com',
+          platform: 'new-api',
+          status: 'active',
+        },
+      },
+    ]);
+
+    let resolveBalance: ((value: {
+      balance: number;
+      used: number;
+      quota: number;
+    }) => void) | null = null;
+    adapterMock.getBalance.mockImplementation(() => new Promise((resolve) => {
+      resolveBalance = resolve;
+    }));
+    const controller = new AbortController();
+    const timeoutError = new Error('health refresh timed out');
+
+    const { refreshBalance } = await import('./balanceService.js');
+    const refreshPromise = refreshBalance(20, { signal: controller.signal });
+    await Promise.resolve();
+    controller.abort(timeoutError);
+    resolveBalance?.({ balance: 10, used: 1, quota: 11 });
+
+    await expect(refreshPromise).rejects.toBe(timeoutError);
+    expect(updateSetMock).not.toHaveBeenCalled();
+    expect(setAccountRuntimeHealthMock).not.toHaveBeenCalled();
   });
 
   it('retries balance fetch once after successful auto relogin', async () => {

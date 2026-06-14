@@ -14,6 +14,7 @@ const withSiteRecordProxyRequestInitMock = vi.fn();
 const dispatchRuntimeRequestMock = vi.fn();
 const reportProxyAllFailedMock = vi.fn();
 const reportTokenExpiredMock = vi.fn();
+const isExplicitTokenExpiredErrorMock = vi.fn();
 const isTokenExpiredErrorMock = vi.fn();
 const shouldRetryProxyRequestMock = vi.fn();
 const recordOauthQuotaHeadersSnapshotMock = vi.fn();
@@ -81,6 +82,8 @@ vi.mock('../../services/alertService.js', () => ({
 }));
 
 vi.mock('../../services/alertRules.js', () => ({
+  isExplicitTokenExpiredError: (...args: unknown[]) => isExplicitTokenExpiredErrorMock(...args),
+  isExplicitTokenExpirationResponse: (...args: unknown[]) => isExplicitTokenExpiredErrorMock(...args),
   isTokenExpiredError: (...args: unknown[]) => isTokenExpiredErrorMock(...args),
 }));
 
@@ -126,6 +129,8 @@ describe('selectSurfaceChannelForAttempt', () => {
     dispatchRuntimeRequestMock.mockReset();
     reportProxyAllFailedMock.mockReset();
     reportTokenExpiredMock.mockReset();
+    isExplicitTokenExpiredErrorMock.mockReset();
+    isExplicitTokenExpiredErrorMock.mockReturnValue(false);
     isTokenExpiredErrorMock.mockReset();
     shouldRetryProxyRequestMock.mockReset();
     recordOauthQuotaHeadersSnapshotMock.mockReset();
@@ -547,6 +552,87 @@ describe('selectSurfaceChannelForAttempt', () => {
       latencyMs: 1200,
       retryCount: 0,
     })).resolves.toEqual({ action: 'retry' });
+  });
+
+  it('does not expire an account for an ambiguous auth failure before retries exhaust', async () => {
+    composeProxyLogMessageMock.mockReturnValue('normalized error');
+    formatUtcSqlDateTimeMock.mockReturnValue('2026-03-21 22:00:00');
+    insertProxyLogMock.mockResolvedValue(undefined);
+    shouldRetryProxyRequestMock.mockReturnValue(true);
+    isTokenExpiredErrorMock.mockReturnValue(true);
+    recordOauthQuotaResetHintMock.mockResolvedValue(null);
+
+    const { createSurfaceFailureToolkit } = await import('./sharedSurface.js');
+    const toolkit = createSurfaceFailureToolkit({
+      warningScope: 'chat',
+      downstreamPath: '/v1/chat/completions',
+      maxRetries: 2,
+      clientContext: null,
+      downstreamApiKeyId: null,
+    });
+
+    await expect(toolkit.handleUpstreamFailure({
+      selected: {
+        channel: { id: 11, routeId: 22 },
+        account: { id: 33, username: 'oauth-user' },
+        site: { name: 'Codex OAuth' },
+        actualModel: 'upstream-model',
+      },
+      requestedModel: 'gpt-5.2',
+      modelName: 'upstream-model',
+      status: 401,
+      errText: 'Unauthorized',
+      rawErrText: '{"error":"Unauthorized"}',
+      latencyMs: 900,
+      retryCount: 0,
+    })).resolves.toEqual({ action: 'retry' });
+
+    expect(reportTokenExpiredMock).not.toHaveBeenCalled();
+  });
+
+  it('expires an account immediately when the upstream explicitly rejects its token', async () => {
+    composeProxyLogMessageMock.mockReturnValue('normalized error');
+    formatUtcSqlDateTimeMock.mockReturnValue('2026-03-21 22:00:00');
+    insertProxyLogMock.mockResolvedValue(undefined);
+    shouldRetryProxyRequestMock.mockReturnValue(true);
+    isExplicitTokenExpiredErrorMock.mockReturnValue(true);
+    isTokenExpiredErrorMock.mockReturnValue(true);
+    recordOauthQuotaResetHintMock.mockResolvedValue(null);
+
+    const { createSurfaceFailureToolkit } = await import('./sharedSurface.js');
+    const toolkit = createSurfaceFailureToolkit({
+      warningScope: 'chat',
+      downstreamPath: '/v1/chat/completions',
+      maxRetries: 2,
+      clientContext: null,
+      downstreamApiKeyId: null,
+    });
+
+    await expect(toolkit.handleUpstreamFailure({
+      selected: {
+        channel: { id: 11, routeId: 22 },
+        account: { id: 33, username: 'oauth-user' },
+        site: { name: 'Codex OAuth' },
+        actualModel: 'upstream-model',
+      },
+      requestedModel: 'gpt-5.2',
+      modelName: 'upstream-model',
+      status: 401,
+      errText: 'expired token',
+      rawErrText: '{"error":"expired token"}',
+      latencyMs: 900,
+      retryCount: 0,
+    })).resolves.toEqual({ action: 'retry' });
+
+    expect(reportTokenExpiredMock).toHaveBeenCalledTimes(1);
+    expect(reportTokenExpiredMock).toHaveBeenCalledWith({
+      accountId: 33,
+      username: 'oauth-user',
+      siteName: 'Codex OAuth',
+      detail: 'HTTP 401',
+    }, {
+      waitForAlert: false,
+    });
   });
 
   it('returns a terminal upstream error response and reports token expiration when retries stop', async () => {

@@ -310,4 +310,27 @@ describe('siteProxy', () => {
 
     expect('dispatcher' in result).toBe(false);
   });
+
+  it('injects an ambient health-check abort signal without replacing an explicit signal', async () => {
+    const {
+      withSiteProxyRequestInit,
+      withSiteRequestAbortSignal,
+    } = await import('./siteProxy.js');
+    const ambientController = new AbortController();
+    const explicitController = new AbortController();
+
+    const ambientResult = await withSiteRequestAbortSignal(
+      ambientController.signal,
+      () => withSiteProxyRequestInit('https://health.example.com/api/user/self'),
+    );
+    const explicitResult = await withSiteRequestAbortSignal(
+      ambientController.signal,
+      () => withSiteProxyRequestInit('https://health.example.com/api/user/self', {
+        signal: explicitController.signal,
+      }),
+    );
+
+    expect(ambientResult.signal).toBe(ambientController.signal);
+    expect(explicitResult.signal).toBe(explicitController.signal);
+  });
 });

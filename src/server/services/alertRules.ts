@@ -22,26 +22,54 @@ function containsHttpStatus(message: string | null | undefined, status: number):
 
 export function isTokenExpiredError(input: { status?: number; message?: string | null }): boolean {
   const rawMessage = input.message || '';
-  const text = (input.message || '').toLowerCase();
   if (isEndpointDispatchDeniedMessage(rawMessage)) return false;
   if (input.status === 401 || containsHttpStatus(rawMessage, 401)) return true;
-  if (!text) return false;
+  return isExplicitTokenExpiredError(rawMessage);
+}
+
+export function isExplicitTokenExpiredError(message?: string | null): boolean {
+  const rawMessage = message || '';
+  const text = rawMessage.toLowerCase();
+  if (isEndpointDispatchDeniedMessage(rawMessage) || !text) return false;
 
   // NewAPI-like sites may return this when session context is missing for an action,
   // which does not always mean the account token is expired.
   if (text.includes('未登录且未提供 access token')) return false;
 
   const tokenPhrase = text.includes('token') || text.includes('令牌') || text.includes('访问令牌');
+  const apiKeyPhrase = (
+    text.includes('api key')
+    || text.includes('api_key')
+    || text.includes('apikey')
+    || text.includes('密钥')
+  );
   const hasInvalid = text.includes('invalid') || text.includes('无效');
   const hasExpired = text.includes('expired') || text.includes('过期');
+  const hasRevoked = text.includes('revoked') || text.includes('撤销') || text.includes('吊销');
 
   return (
     text.includes('jwt expired') ||
     text.includes('token expired') ||
     (tokenPhrase && (hasInvalid || hasExpired)) ||
+    (apiKeyPhrase && (hasInvalid || hasExpired || hasRevoked)) ||
+    /incorrect\s+api[_\s-]?key/.test(text) ||
     /invalid\s+access\s+token/.test(text) ||
     /access\s+token\s+is\s+invalid/.test(text)
   );
+}
+
+export function isExplicitTokenExpirationResponse(input: {
+  status?: number;
+  message?: string | null;
+}): boolean {
+  if (
+    input.status !== 400
+    && input.status !== 401
+    && input.status !== 403
+  ) {
+    return false;
+  }
+  return isExplicitTokenExpiredError(input.message);
 }
 
 export function appendSessionTokenRebindHint(message?: string | null): string {

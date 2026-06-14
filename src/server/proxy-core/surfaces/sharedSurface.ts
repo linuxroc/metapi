@@ -6,6 +6,7 @@ import { resolveProxyUsageWithSelfLogFallback } from '../../services/proxyUsageF
 import type { DownstreamRoutingPolicy } from '../../services/downstreamPolicyTypes.js';
 import { reportProxyAllFailed, reportTokenExpired } from '../../services/alertService.js';
 import { isTokenExpiredError } from '../../services/alertRules.js';
+import { reportExplicitProxyTokenExpiration } from '../../services/proxyTokenExpirationService.js';
 import { shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { composeProxyLogMessage } from '../../services/proxyLogMessage.js';
 import { resolveProxyLogBilling } from '../../services/proxyBilling.js';
@@ -934,18 +935,30 @@ export function createSurfaceFailureToolkit(input: {
         errorText: rawErrText,
       }));
 
-      if (isTokenExpiredError({ status: args.status, message: args.errText })) {
+      const explicitTokenExpiration = await reportExplicitProxyTokenExpiration({
+        status: args.status,
+        errorText: args.errText,
+        accountId: args.selected.account.id,
+        username: args.selected.account.username,
+        siteName: args.selected.site.name,
+        warningScope: input.warningScope,
+      });
+
+      if (shouldRetryProxyRequest(args.status, args.errText)) {
+        const retry = maybeRetry(args.retryCount);
+        if (retry) return retry;
+      }
+
+      if (
+        !explicitTokenExpiration
+        && isTokenExpiredError({ status: args.status, message: args.errText })
+      ) {
         runBestEffort('report token expired', () => reportTokenExpired({
           accountId: args.selected.account.id,
           username: args.selected.account.username,
           siteName: args.selected.site.name,
           detail: `HTTP ${args.status}`,
         }));
-      }
-
-      if (shouldRetryProxyRequest(args.status, args.errText)) {
-        const retry = maybeRetry(args.retryCount);
-        if (retry) return retry;
       }
 
       runBestEffort('report proxy all failed', () => reportProxyAllFailed({

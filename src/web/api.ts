@@ -9,7 +9,11 @@ const nodeBuffer = (globalThis as typeof globalThis & { Buffer?: BufferLike })
 
 type RequestOptions = RequestInit & {
   timeoutMs?: number;
+  maxRetries?: number;
 };
+
+const DEFAULT_ADMIN_READ_RETRIES = 1;
+const MAX_RETRY_DELAY_MS = 2_000;
 
 function requireAuthToken(): string {
   const token = getAuthToken(localStorage);
@@ -26,6 +30,29 @@ function requireAuthToken(): string {
     throw new Error("Session expired");
   }
   return token;
+}
+
+async function isInvalidAdminSessionResponse(res: Response): Promise<boolean> {
+  if (res.status !== 401 && res.status !== 403) return false;
+
+  try {
+    const payload = await res.clone().json() as {
+      error?: unknown;
+      message?: unknown;
+    };
+    const error = typeof payload?.error === "string"
+      ? payload.error.trim().toLowerCase()
+      : "";
+    const message = typeof payload?.message === "string"
+      ? payload.message.trim().toLowerCase()
+      : "";
+    return (
+      (res.status === 401 && error === "missing authorization header")
+      || (res.status === 403 && (error === "invalid token" || message === "invalid token"))
+    );
+  } catch {
+    return false;
+  }
 }
 
 async function extractResponseErrorMessage(res: Response): Promise<string> {
@@ -93,6 +120,7 @@ async function fetchAuthenticatedResponse(
 ): Promise<Response> {
   const {
     timeoutMs = 30_000,
+    maxRetries: _maxRetries,
     signal: externalSignal,
     ...fetchOptions
   } = options;
@@ -126,7 +154,7 @@ async function fetchAuthenticatedResponse(
       signal: controller.signal,
       headers,
     });
-    if (res.status === 401 || res.status === 403) {
+    if (await isInvalidAdminSessionResponse(res)) {
       const hadToken = !!getAuthToken(localStorage);
       clearAuthSession(localStorage);
       if (
@@ -156,15 +184,138 @@ async function fetchAuthenticatedResponse(
   }
 }
 
+function normalizeRequestMethod(options: RequestOptions): string {
+  return String(options.method || "GET").trim().toUpperCase() || "GET";
+}
+
+function resolveReadRetryCount(url: string, options: RequestOptions): number {
+  const method = normalizeRequestMethod(options);
+  if ((method !== "GET" && method !== "HEAD") || !url.startsWith("/api/")) {
+    return 0;
+  }
+  const configured = options.maxRetries ?? DEFAULT_ADMIN_READ_RETRIES;
+  if (!Number.isFinite(configured)) return DEFAULT_ADMIN_READ_RETRIES;
+  return Math.max(0, Math.min(3, Math.trunc(configured)));
+}
+
+function isRetryableReadStatus(status: number): boolean {
+  return (
+    status === 408
+    || status === 425
+    || status === 429
+    || status === 500
+    || status === 502
+    || status === 503
+    || status === 504
+  );
+}
+
+function isRetryableReadError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (error.message === "Session expired") return false;
+  return (
+    error.name === "TypeError"
+    || /请求超时|network|fetch failed|connection|econnreset|econnrefused/i.test(error.message)
+  );
+}
+
+function parseRetryAfterMs(res: Response | null): number | null {
+  if (!res) return null;
+  const raw = res.headers.get("retry-after")?.trim();
+  if (!raw) return null;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds)) {
+    return Math.max(0, Math.min(MAX_RETRY_DELAY_MS, Math.round(seconds * 1_000)));
+  }
+  const retryAt = Date.parse(raw);
+  if (!Number.isFinite(retryAt)) return null;
+  return Math.max(0, Math.min(MAX_RETRY_DELAY_MS, retryAt - Date.now()));
+}
+
+async function waitForReadRetry(
+  attempt: number,
+  response: Response | null,
+  signal?: AbortSignal | null,
+  remainingMs?: number,
+): Promise<void> {
+  const requestedDelayMs = parseRetryAfterMs(response)
+    ?? Math.min(MAX_RETRY_DELAY_MS, 200 * (attempt + 1));
+  const delayMs = typeof remainingMs === "number"
+    ? Math.min(requestedDelayMs, Math.max(0, remainingMs))
+    : requestedDelayMs;
+  if (delayMs <= 0) return;
+
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    };
+    const timer = setTimeout(finish, delayMs);
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    if (!signal) return;
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 async function request<T = any>(
   url: string,
   options: RequestOptions = {},
 ): Promise<T> {
-  const res = await fetchAuthenticatedResponse(url, options);
-  if (!res.ok) {
+  const maxRetries = resolveReadRetryCount(url, options);
+  const timeoutMs = options.timeoutMs ?? 30_000;
+  const deadlineAt = Date.now() + Math.max(0, timeoutMs);
+  const timeoutError = () => new Error(
+    `请求超时（${Math.max(1, Math.round(timeoutMs / 1000))}s）`,
+  );
+
+  for (let attempt = 0; ; attempt += 1) {
+    const remainingMs = deadlineAt - Date.now();
+    if (remainingMs <= 0) throw timeoutError();
+
+    let res: Response;
+    try {
+      res = await fetchAuthenticatedResponse(url, {
+        ...options,
+        timeoutMs: Math.max(1, Math.ceil(remainingMs)),
+      });
+    } catch (error) {
+      if (
+        attempt >= maxRetries
+        || options.signal?.aborted
+        || !isRetryableReadError(error)
+      ) {
+        throw error;
+      }
+      const retryBudgetMs = deadlineAt - Date.now();
+      if (retryBudgetMs <= 0) throw timeoutError();
+      await waitForReadRetry(attempt, null, options.signal, retryBudgetMs);
+      continue;
+    }
+
+    if (res.ok) {
+      return res.json() as Promise<T>;
+    }
+    if (attempt < maxRetries && isRetryableReadStatus(res.status)) {
+      await res.body?.cancel().catch(() => {});
+      const retryBudgetMs = deadlineAt - Date.now();
+      if (retryBudgetMs <= 0) throw timeoutError();
+      await waitForReadRetry(attempt, res, options.signal, retryBudgetMs);
+      continue;
+    }
     throw new Error(await extractResponseErrorMessage(res));
   }
-  return res.json() as Promise<T>;
 }
 
 async function streamSse(

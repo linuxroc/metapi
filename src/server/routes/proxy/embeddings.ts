@@ -4,6 +4,7 @@ import { config } from '../../config.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
 import { reportProxyAllFailed, reportTokenExpired } from '../../services/alertService.js';
 import { isTokenExpiredError } from '../../services/alertRules.js';
+import { reportExplicitProxyTokenExpiration } from '../../services/proxyTokenExpirationService.js';
 import { shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { resolveProxyUsageWithSelfLogFallback } from '../../services/proxyUsageFallbackService.js';
 import { parseProxyUsage } from '../../services/proxyUsageParser.js';
@@ -187,17 +188,29 @@ export async function embeddingsProxyRoute(app: FastifyInstance) {
           false,
           firstByteLatencyMs,
         );
-        if (status > 0 && isTokenExpiredError({ status, message: errorText })) {
+        const explicitTokenExpiration = await reportExplicitProxyTokenExpiration({
+          status,
+          errorText,
+          accountId: selected.account.id,
+          username: selected.account.username,
+          siteName: selected.site.name,
+          warningScope: 'embeddings',
+        });
+        if ((status > 0 ? shouldRetryProxyRequest(status, errorText) : true) && canRetryChannelSelection(retryCount, forcedChannelId)) {
+          retryCount++;
+          continue;
+        }
+        if (
+          !explicitTokenExpiration
+          && status > 0
+          && isTokenExpiredError({ status, message: errorText })
+        ) {
           await reportTokenExpired({
             accountId: selected.account.id,
             username: selected.account.username,
             siteName: selected.site.name,
             detail: `HTTP ${status}`,
-          });
-        }
-        if ((status > 0 ? shouldRetryProxyRequest(status, errorText) : true) && canRetryChannelSelection(retryCount, forcedChannelId)) {
-          retryCount++;
-          continue;
+          }, { waitForAlert: false });
         }
         await reportProxyAllFailed({
           model: requestedModel,

@@ -136,7 +136,7 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
 
   if (isSiteDisabled(site.status)) {
     const createdAt = formatUtcSqlDateTime(new Date());
-    setAccountRuntimeHealth(account.id, {
+    await setAccountRuntimeHealth(account.id, {
       state: 'disabled',
       reason: '\u7ad9\u70b9\u5df2\u7981\u7528',
       source: 'checkin',
@@ -215,7 +215,7 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
       : manualVerificationRequired
         ? manualVerificationMessage
       : (alreadyCheckedIn ? '\u4eca\u65e5\u5df2\u7b7e\u5230' : (result.message || '\u7b7e\u5230\u6210\u529f'));
-    setAccountRuntimeHealth(account.id, {
+    await setAccountRuntimeHealth(account.id, {
       state: healthState,
       reason: healthReason,
       source: 'checkin',
@@ -289,7 +289,7 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
       .where(eq(schema.accounts.id, account.id))
       .run();
 
-    setAccountRuntimeHealth(account.id, {
+    await setAccountRuntimeHealth(account.id, {
       state: 'unhealthy',
       reason: result.message || '\u7b7e\u5230\u5931\u8d25',
       source: 'checkin',

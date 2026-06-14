@@ -246,6 +246,31 @@ describe('DownstreamKeys page', () => {
     }
   });
 
+  it('keeps rendering key data when an auxiliary route request fails', async () => {
+    apiMock.getRoutesLite.mockRejectedValueOnce(new Error('route service unavailable'));
+
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/downstream-keys']}>
+            <ToastProvider>
+              <DownstreamKeys />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const text = collectText(root.root);
+      expect(text).toContain('smoke-key');
+      expect(text).toContain('sk-s****0315');
+      expect(text).toContain('部分数据加载失败');
+    } finally {
+      root?.unmount();
+    }
+  });
+
   it('filters rows locally by search and status', async () => {
     apiMock.getDownstreamApiKeysSummary.mockResolvedValue({
       success: true,
