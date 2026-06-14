@@ -16,14 +16,18 @@ describe('docker workflows', () => {
     expect(releaseWorkflow).toContain('"${tag}-armv7"');
   });
 
-  it('derives Docker Hub image names from the configured username secret', () => {
+  it('publishes GHCR images and derives optional Docker Hub targets from secrets', () => {
     const ciWorkflow = readFileSync(resolve(process.cwd(), '.github/workflows/ci.yml'), 'utf8');
     const releaseWorkflow = readFileSync(resolve(process.cwd(), '.github/workflows/release.yml'), 'utf8');
 
-    expect(ciWorkflow).toContain('DOCKERHUB_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/metapi');
+    expect(ciWorkflow).toContain('GHCR_IMAGE: ghcr.io/${{ github.repository }}');
+    expect(ciWorkflow).toContain('DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}');
+    expect(ciWorkflow).toContain('echo "${DOCKERHUB_USERNAME}/metapi"');
     expect(ciWorkflow).not.toContain('images: 1467078763/metapi');
 
-    expect(releaseWorkflow).toContain('DOCKERHUB_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/metapi');
+    expect(releaseWorkflow).toContain('GHCR_IMAGE: ghcr.io/${{ github.repository }}');
+    expect(releaseWorkflow).toContain('DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}');
+    expect(releaseWorkflow).toContain('echo "${DOCKERHUB_USERNAME}/metapi"');
     expect(releaseWorkflow).not.toContain('1467078763/metapi');
   });
 
