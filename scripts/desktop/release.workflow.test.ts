@@ -28,4 +28,22 @@ describe('release workflow', () => {
     expect(workflow).toContain("if: runner.os == 'Linux'");
     expect(workflow).toContain('sudo apt-get install --no-install-recommends -y rpm');
   });
+
+  it('publishes GHCR images when Docker Hub credentials are unavailable', () => {
+    const workflow = readFileSync(resolve(process.cwd(), '.github/workflows/release.yml'), 'utf8');
+
+    expect(workflow).toContain('GHCR_IMAGE: ghcr.io/${{ github.repository }}');
+    expect(workflow).toContain('Docker Hub credentials are not configured; publishing GHCR only.');
+    expect(workflow).toContain("if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}");
+    expect(workflow).not.toContain('Ensure Docker Hub secrets are configured');
+  });
+
+  it('keeps main-branch container publishing available through GHCR', () => {
+    const workflow = readFileSync(resolve(process.cwd(), '.github/workflows/ci.yml'), 'utf8');
+
+    expect(workflow.match(/packages: write/g)).toHaveLength(2);
+    expect(workflow).toContain('GHCR_IMAGE: ghcr.io/${{ github.repository }}');
+    expect(workflow).toContain('Log in to GitHub Container Registry');
+    expect(workflow).not.toContain('Ensure Docker Hub secrets are configured');
+  });
 });

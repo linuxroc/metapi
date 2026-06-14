@@ -290,7 +290,9 @@ jobs:
     timeout-minutes: 45
     if: startsWith(github.ref, 'refs/tags/')
     env:
-      DOCKERHUB_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/metapi
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      GHCR_IMAGE: ghcr.io/${{ github.repository }}
     strategy:
       fail-fast: false
       matrix:
@@ -309,12 +311,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Ensure Docker Hub secrets are configured
+      - name: Resolve container registry targets
+        id: registry-images
+        shell: bash
         run: |
-          if [ -z "${{ secrets.DOCKERHUB_USERNAME }}" ] || [ -z "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
-            echo "Missing Docker Hub secrets: DOCKERHUB_USERNAME / DOCKERHUB_TOKEN"
-            exit 1
-          fi
+          set -euo pipefail
+          {
+            echo 'names<<EOF'
+            echo "${GHCR_IMAGE,,}"
+            if [ -n "${DOCKERHUB_USERNAME:-}" ] && [ -n "${DOCKERHUB_TOKEN:-}" ]; then
+              echo "${DOCKERHUB_USERNAME}/metapi"
+            else
+              echo "Docker Hub credentials are not configured; publishing GHCR only." >&2
+            fi
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -331,18 +342,17 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Login to Docker Hub
+        if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
         uses: docker/login-action@v4
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
 
       - name: Docker metadata
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: |
-            ${{ env.DOCKERHUB_IMAGE }}
-            ghcr.io/${{ github.repository }}
+          images: ${{ steps.registry-images.outputs.names }}
           tags: |
             type=ref,event=tag
             type=raw,value=latest
@@ -382,18 +392,29 @@ jobs:
     timeout-minutes: 15
     if: startsWith(github.ref, 'refs/tags/')
     env:
-      DOCKERHUB_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/metapi
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      GHCR_IMAGE: ghcr.io/${{ github.repository }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Ensure Docker Hub secrets are configured
+      - name: Resolve container registry targets
+        id: registry-images
+        shell: bash
         run: |
-          if [ -z "${{ secrets.DOCKERHUB_USERNAME }}" ] || [ -z "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
-            echo "Missing Docker Hub secrets: DOCKERHUB_USERNAME / DOCKERHUB_TOKEN"
-            exit 1
-          fi
+          set -euo pipefail
+          {
+            echo 'names<<EOF'
+            echo "${GHCR_IMAGE,,}"
+            if [ -n "${DOCKERHUB_USERNAME:-}" ] && [ -n "${DOCKERHUB_TOKEN:-}" ]; then
+              echo "${DOCKERHUB_USERNAME}/metapi"
+            else
+              echo "Docker Hub credentials are not configured; publishing GHCR only." >&2
+            fi
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -406,18 +427,17 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Login to Docker Hub
+        if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
         uses: docker/login-action@v4
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
 
       - name: Docker metadata
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: |
-            ${{ env.DOCKERHUB_IMAGE }}
-            ghcr.io/${{ github.repository }}
+          images: ${{ steps.registry-images.outputs.names }}
           tags: |
             type=ref,event=tag
             type=raw,value=latest

@@ -349,8 +349,13 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
     env:
-      DOCKERHUB_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/metapi
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      GHCR_IMAGE: ghcr.io/${{ github.repository }}
     strategy:
       fail-fast: false
       matrix:
@@ -369,12 +374,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Ensure Docker Hub secrets are configured
+      - name: Resolve container registry targets
+        id: registry-images
+        shell: bash
         run: |
-          if [ -z "${{ secrets.DOCKERHUB_USERNAME }}" ] || [ -z "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
-            echo "Missing Docker Hub secrets: DOCKERHUB_USERNAME / DOCKERHUB_TOKEN"
-            exit 1
-          fi
+          set -euo pipefail
+          {
+            echo 'names<<EOF'
+            echo "${GHCR_IMAGE,,}"
+            if [ -n "${DOCKERHUB_USERNAME:-}" ] && [ -n "${DOCKERHUB_TOKEN:-}" ]; then
+              echo "${DOCKERHUB_USERNAME}/metapi"
+            else
+              echo "Docker Hub credentials are not configured; publishing GHCR only." >&2
+            fi
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -383,17 +397,25 @@ jobs:
         if: matrix.arch == 'armv7'
         uses: docker/setup-qemu-action@v4
 
-      - name: Log in to Docker Hub
+      - name: Log in to GitHub Container Registry
         uses: docker/login-action@v4
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
+        uses: docker/login-action@v4
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
 
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ env.DOCKERHUB_IMAGE }}
+          images: ${{ steps.registry-images.outputs.names }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=branch
@@ -433,34 +455,56 @@ jobs:
     runs-on: ubuntu-latest
     needs: publish-docker-arch
     timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
     env:
-      DOCKERHUB_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/metapi
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      GHCR_IMAGE: ghcr.io/${{ github.repository }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Ensure Docker Hub secrets are configured
+      - name: Resolve container registry targets
+        id: registry-images
+        shell: bash
         run: |
-          if [ -z "${{ secrets.DOCKERHUB_USERNAME }}" ] || [ -z "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
-            echo "Missing Docker Hub secrets: DOCKERHUB_USERNAME / DOCKERHUB_TOKEN"
-            exit 1
-          fi
+          set -euo pipefail
+          {
+            echo 'names<<EOF'
+            echo "${GHCR_IMAGE,,}"
+            if [ -n "${DOCKERHUB_USERNAME:-}" ] && [ -n "${DOCKERHUB_TOKEN:-}" ]; then
+              echo "${DOCKERHUB_USERNAME}/metapi"
+            else
+              echo "Docker Hub credentials are not configured; publishing GHCR only." >&2
+            fi
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Log in to Docker Hub
+      - name: Log in to GitHub Container Registry
         uses: docker/login-action@v4
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
+        uses: docker/login-action@v4
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
 
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ env.DOCKERHUB_IMAGE }}
+          images: ${{ steps.registry-images.outputs.names }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=branch
